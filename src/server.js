@@ -2,11 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const { testConnection } = require('./config/database');
-
-// Importar rutas
-const authRoutes = require('./routes/auth');
-const preferencesRoutes = require('./routes/preferences');
-const offersRoutes = require('./routes/offers');
+const { startCronJobs } = require('../jobs/scheduler');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -15,22 +11,23 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
+// Routes
+app.use('/api/auth', require('./routes/auth'));
+app.use('/api/preferences', require('./routes/preferences'));
+app.use('/api/offers', require('./routes/offers'));
+
 // Health check
 app.get('/', (req, res) => {
-  res.json({
-    success: true,
-    message: 'APD Backend funcionando',
-    version: '1.0.0'
-  });
+  res.json({ message: 'APD Backend API', status: 'running' });
 });
 
-// Rutas de la API
-app.use('/api/auth', authRoutes);
-app.use('/api/preferences', preferencesRoutes);
-app.use('/api/offers', offersRoutes);
+// Conectar a base de datos
+testConnection();
 
-// Iniciar servidor
-app.listen(PORT, async () => {
+// Iniciar cron jobs
+startCronJobs();
+
+// Start server
+app.listen(PORT, () => {
   console.log(`Servidor corriendo en puerto ${PORT}`);
-  await testConnection();
 });
