@@ -126,17 +126,7 @@ const getAllOffers = async (req, res) => {
       paramIndex++;
     }
 
-   if (modalidades.length > 0) {
-  whereConditions.push(`unaccent(LOWER(o.modalidad)) = ANY($${paramIndex})`);
-  params.push(modalidades.map(m => 
-    m.toLowerCase()
-      .normalize('NFD')
-      .replace(/[\u0300-\u036f]/g, '')
-  ));
-  paramIndex++;
-}
-
-    if (turnos.length > 0) {
+     if (turnos.length > 0) {
       const turnoMap = { 'mañana': 'M', 'tarde': 'T', 'noche': 'N' };
       const turnosCodes = turnos.map(t => turnoMap[t.toLowerCase()] || t);
       whereConditions.push(`o.turno = ANY($${paramIndex})`);
@@ -328,3 +318,4 @@ module.exports = {
   toggleFavorite
 
 };
+
