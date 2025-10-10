@@ -142,7 +142,9 @@ const getAllOffers = async (req, res) => {
       const turnoMap = { 
         'mañana': 'M', 
         'manana': 'M',
-        'tarde': 'T', 
+        'tarde': 'T',
+        'vespertino': 'V',
+        'alternado': 'A',
         'noche': 'N' 
       };
       
@@ -152,7 +154,7 @@ const getAllOffers = async (req, res) => {
       }).filter(Boolean);
       
       if (turnosCodes.length > 0) {
-        whereConditions.push(`o.turno = ANY($${paramIndex})`);
+        whereConditions.push(`o.turno = ANY(${paramIndex})`);
         params.push(turnosCodes);
         paramIndex++;
       }
