@@ -1,4 +1,4 @@
-const bcrypt = require('bcryptjs');
+const argon2 = require('argon2');
 const jwt = require('jsonwebtoken');
 const { query } = require('../config/database');
 
@@ -122,7 +122,7 @@ const register = async (req, res) => {
 
     // Hash de la contraseña
     const salt = await bcrypt.genSalt(10);
-    const passwordHash = await bcrypt.hash(password, salt);
+    const passwordMatch = await argon2.verify(user.password_hash, password);
 
     // Insertar nuevo usuario
     const result = await query(
@@ -262,3 +262,4 @@ module.exports = {
   verifyToken,
   verify
 };
+
