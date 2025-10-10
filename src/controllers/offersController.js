@@ -88,6 +88,8 @@ const getAllOffers = async (req, res) => {
   try {
     const userId = req.user.id;
 
+    console.log('🔍 [getAllOffers] userId:', userId);
+
     const prefsResult = await query(
       'SELECT modalidades, distritos, turnos FROM user_preferences WHERE user_id = $1',
       [userId]
@@ -106,6 +108,11 @@ const getAllOffers = async (req, res) => {
     const modalidades = prefs.modalidades || [];
     const distritos = prefs.distritos || [];
     const turnos = prefs.turnos || [];
+
+    console.log('🔍 [getAllOffers] Preferencias DB:');
+    console.log('   - modalidades:', modalidades);
+    console.log('   - distritos:', distritos);
+    console.log('   - turnos:', turnos);
 
     if (modalidades.length === 0 && distritos.length === 0) {
       return res.json({
@@ -126,7 +133,13 @@ const getAllOffers = async (req, res) => {
       paramIndex++;
     }
 
-     if (turnos.length > 0) {
+    if (distritos.length > 0) {
+      whereConditions.push(`LOWER(o.distrito) = ANY($${paramIndex})`);
+      params.push(distritos.map(d => d.toLowerCase()));
+      paramIndex++;
+    }
+
+    if (turnos.length > 0) {
       const turnoMap = { 'mañana': 'M', 'tarde': 'T', 'noche': 'N' };
       const turnosCodes = turnos.map(t => turnoMap[t.toLowerCase()] || t);
       whereConditions.push(`o.turno = ANY($${paramIndex})`);
@@ -143,7 +156,19 @@ const getAllOffers = async (req, res) => {
       LIMIT 100
     `;
 
+    console.log('🔍 [getAllOffers] Query SQL:', queryText);
+    console.log('🔍 [getAllOffers] Params:', JSON.stringify(params, null, 2));
+    console.log('🔍 [getAllOffers] WhereConditions:', whereConditions);
+
     const result = await query(queryText, params);
+    
+    console.log('🔍 [getAllOffers] Resultados obtenidos:', result.rows.length);
+    if (result.rows.length > 0) {
+      console.log('🔍 [getAllOffers] Primeras 3 ofertas - distritos:', 
+        result.rows.slice(0, 3).map(r => r.distrito)
+      );
+    }
+
     const offers = result.rows.map(row => formatOffer(row, row));
 
     res.json({
@@ -316,6 +341,4 @@ module.exports = {
   getOfferById,
   markAsRead,
   toggleFavorite
-
 };
-
