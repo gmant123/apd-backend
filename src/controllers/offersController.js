@@ -154,7 +154,7 @@ const getAllOffers = async (req, res) => {
       }).filter(Boolean);
       
       if (turnosCodes.length > 0) {
-        whereConditions.push(`o.turno = ANY(${paramIndex})`);
+        whereConditions.push(`o.turno = ANY($${paramIndex})`);
         params.push(turnosCodes);
         paramIndex++;
       }
@@ -359,3 +359,4 @@ module.exports = {
   markAsRead,
   toggleFavorite
 };
+
