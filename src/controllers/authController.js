@@ -25,6 +25,14 @@ const login = async (req, res) => {
     );
 
     if (result.rows.length === 0) {
+      // Prevención de timing attack
+      await argon2.hash('dummy_password', {
+        type: argon2.argon2id,
+        memoryCost: 65536,
+        timeCost: 3,
+        parallelism: 4
+      });
+      
       return res.status(401).json({
         success: false,
         message: 'DNI o contraseña incorrectos'
@@ -33,8 +41,8 @@ const login = async (req, res) => {
 
     const user = result.rows[0];
 
-    // Verificar contraseña
-    const validPassword = await bcrypt.compare(password, user.password_hash);
+    // Verificar contraseña con Argon2
+    const validPassword = await argon2.verify(user.password_hash, password);
 
     if (!validPassword) {
       return res.status(401).json({
@@ -120,9 +128,13 @@ const register = async (req, res) => {
       });
     }
 
-    // Hash de la contraseña
-    const salt = await bcrypt.genSalt(10);
-    const passwordMatch = await argon2.verify(user.password_hash, password);
+    // Hash de la contraseña con Argon2id
+    const passwordHash = await argon2.hash(password, {
+      type: argon2.argon2id,
+      memoryCost: 65536,  // 64 MB
+      timeCost: 3,
+      parallelism: 4
+    });
 
     // Insertar nuevo usuario
     const result = await query(
@@ -262,4 +274,3 @@ module.exports = {
   verifyToken,
   verify
 };
-
