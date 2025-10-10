@@ -58,7 +58,6 @@ const getUnreadOffers = async (req, res) => {
        JOIN user_offers uo ON o.id = uo.offer_id
        WHERE uo.user_id = $1 
        AND uo.is_new = true
-       AND o.hasta >= CURRENT_DATE
        ORDER BY o.created_at DESC`,
       [userId]
     );
@@ -123,7 +122,7 @@ const getAllOffers = async (req, res) => {
       });
     }
 
-    let whereConditions = ['o.hasta >= CURRENT_DATE'];
+    let whereConditions = [];
     let params = [userId];
     let paramIndex = 2;
 
@@ -140,18 +139,34 @@ const getAllOffers = async (req, res) => {
     }
 
     if (turnos.length > 0) {
-      const turnoMap = { 'mañana': 'M', 'tarde': 'T', 'noche': 'N' };
-      const turnosCodes = turnos.map(t => turnoMap[t.toLowerCase()] || t);
-      whereConditions.push(`o.turno = ANY($${paramIndex})`);
-      params.push(turnosCodes);
-      paramIndex++;
+      const turnoMap = { 
+        'mañana': 'M', 
+        'manana': 'M',
+        'tarde': 'T', 
+        'noche': 'N' 
+      };
+      
+      const turnosCodes = turnos.map(t => {
+        const normalized = t.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+        return turnoMap[normalized] || turnoMap[t.toLowerCase()] || null;
+      }).filter(Boolean);
+      
+      if (turnosCodes.length > 0) {
+        whereConditions.push(`o.turno = ANY($${paramIndex})`);
+        params.push(turnosCodes);
+        paramIndex++;
+      }
     }
+
+    const whereClause = whereConditions.length > 0 
+      ? `WHERE ${whereConditions.join(' AND ')}`
+      : '';
 
     const queryText = `
       SELECT o.*, uo.is_new, uo.is_favorite, uo.viewed_at
       FROM offers o
       LEFT JOIN user_offers uo ON o.id = uo.offer_id AND uo.user_id = $1
-      WHERE ${whereConditions.join(' AND ')}
+      ${whereClause}
       ORDER BY o.created_at DESC
       LIMIT 100
     `;
