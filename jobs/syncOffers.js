@@ -1,4 +1,100 @@
+// ========================================
+// SYNC OFFERS FROM ABC SOLR
+// Sincroniza ofertas desde el sistema ABC
+// con limpieza de datos inconsistentes
+// ========================================
+
 const { query } = require('../src/config/database');
+
+// ========================================
+// FUNCIÓN: Limpiar fechas ilógicas
+// ========================================
+function cleanOfferDates(offer) {
+  try {
+    const desdeField = offer.supl_desde || offer.desde;
+    const hastaField = offer.supl_hasta || offer.hasta;
+    
+    const desde = desdeField ? new Date(desdeField) : null;
+    const hasta = hastaField ? new Date(hastaField) : null;
+
+    // Validar que las fechas sean válidas
+    if (desde && isNaN(desde.getTime())) {
+      console.warn(`[SYNC] Oferta ${offer.id}: fecha 'desde' inválida (${desdeField}) - anulando`);
+      return { desde: null, hasta: hastaField };
+    }
+
+    if (hasta && isNaN(hasta.getTime())) {
+      console.warn(`[SYNC] Oferta ${offer.id}: fecha 'hasta' inválida (${hastaField}) - anulando`);
+      return { desde: desdeField, hasta: null };
+    }
+
+    // Si hasta < desde, anular ambas fechas
+    if (desde && hasta && hasta < desde) {
+      console.warn(
+        `[SYNC] Oferta ${offer.id}: fechas ilógicas detectadas ` +
+        `(desde: ${desdeField}, hasta: ${hastaField}) - anulando ambas fechas`
+      );
+      return { desde: null, hasta: null };
+    }
+
+    // Si las fechas son válidas, devolverlas normales
+    return {
+      desde: desdeField || null,
+      hasta: hastaField || null
+    };
+  } catch (error) {
+    console.error(`[SYNC] Error limpiando fechas de oferta ${offer.id}:`, error.message);
+    return { desde: null, hasta: null };
+  }
+}
+
+// ========================================
+// FUNCIÓN: Limpiar turno y revista
+// ========================================
+function cleanOfferCodes(offer) {
+  // Turno: solo primer carácter, uppercase
+  let turno = offer.turno ? offer.turno.toString().trim().substring(0, 1).toUpperCase() : null;
+  
+  // Validar que turno sea válido
+  const validTurnos = ['M', 'T', 'N', 'V', 'A'];
+  if (turno && !validTurnos.includes(turno)) {
+    console.warn(`[SYNC] Oferta ${offer.id}: turno inválido (${offer.turno}) - anulando`);
+    turno = null;
+  }
+
+  // Revista: solo primer carácter, uppercase (con fallback)
+  const revistaField = offer.supl_revista || offer.revista || '';
+  let revista = revistaField ? revistaField.toString().trim().substring(0, 1).toUpperCase() : null;
+  
+  // Validar que revista sea válida
+  const validRevistas = ['S', 'T', 'I', 'P'];
+  if (revista && !validRevistas.includes(revista)) {
+    console.warn(`[SYNC] Oferta ${offer.id}: revista inválida (${revistaField}) - anulando`);
+    revista = null;
+  }
+
+  return { turno, revista };
+}
+
+/**
+ * Extrae horarios de los días de la semana
+ */
+function extractHorarios(offer) {
+  const dias = ['lunes', 'martes', 'miercoles', 'jueves', 'viernes', 'sabado'];
+  const horarios = [];
+  
+  dias.forEach(dia => {
+    const horario = offer[dia];
+    if (horario && String(horario).trim() !== '') {
+      horarios.push({
+        dia: dia.charAt(0).toUpperCase() + dia.slice(1),
+        hora: String(horario).trim()
+      });
+    }
+  });
+  
+  return horarios;
+}
 
 /**
  * Sincroniza ofertas desde ABC Solr a la base de datos
@@ -7,6 +103,9 @@ const { query } = require('../src/config/database');
 async function syncOffersFromABC() {
   console.log('🔄 Iniciando sync con ABC Solr...');
   const startTime = Date.now();
+  
+  let cleanedDatesCount = 0;
+  let cleanedCodesCount = 0;
   
   try {
     const ABC_SOLR_URL = process.env.ABC_SOLR_URL || 'https://servicios3.abc.gob.ar/valoracion.docente/api/apd.oferta.encabezado';
@@ -50,6 +149,21 @@ async function syncOffersFromABC() {
       
       for (const offer of batch) {
         try {
+          // 👇 LIMPIEZA DE DATOS (LO NUEVO)
+          const cleanedDates = cleanOfferDates(offer);
+          const cleanedCodes = cleanOfferCodes(offer);
+          
+          // Contar limpiezas
+          if (cleanedDates.desde === null && cleanedDates.hasta === null && 
+              (offer.supl_desde || offer.desde || offer.supl_hasta || offer.hasta)) {
+            cleanedDatesCount++;
+          }
+          if ((cleanedCodes.turno === null && offer.turno) || 
+              (cleanedCodes.revista === null && (offer.supl_revista || offer.revista))) {
+            cleanedCodesCount++;
+          }
+          // 👆 FIN LIMPIEZA
+          
           const horarios = extractHorarios(offer);
           
           const result = await query(`
@@ -86,11 +200,11 @@ async function syncOffersFromABC() {
             offer.descnivelmodalidad?.toLowerCase(),
             offer.escuela || offer.codestablecimiento,
             offer.cursodivision || offer.curso_division,
-            (offer.turno || '').substring(0, 1) || null,
-(offer.supl_revista || offer.revista || '').substring(0, 1) || null,
+            cleanedCodes.turno,        // 👈 LIMPIADO
+            cleanedCodes.revista,      // 👈 LIMPIADO
             offer.hsmodulos || offer.horas_modulos,
-            offer.supl_desde || offer.desde,
-            offer.supl_hasta || offer.hasta,
+            cleanedDates.desde,        // 👈 LIMPIADO
+            cleanedDates.hasta,        // 👈 LIMPIADO
             JSON.stringify(horarios),
             offer.domiciliodesempeno || offer.domicilio,
             offer.reemp_apeynom,
@@ -124,6 +238,12 @@ async function syncOffersFromABC() {
     console.log(`✅ Sync completado en ${duration}s`);
     console.log(`   📥 Insertadas: ${insertadas}`);
     console.log(`   🔄 Actualizadas: ${actualizadas}`);
+    if (cleanedDatesCount > 0) {
+      console.log(`   🧹 Fechas limpiadas: ${cleanedDatesCount}`);
+    }
+    if (cleanedCodesCount > 0) {
+      console.log(`   🧹 Códigos limpiados: ${cleanedCodesCount}`);
+    }
     if (errores > 0) {
       console.log(`   ⚠️ Errores: ${errores}`);
     }
@@ -133,6 +253,8 @@ async function syncOffersFromABC() {
       insertadas, 
       actualizadas, 
       errores,
+      cleanedDates: cleanedDatesCount,
+      cleanedCodes: cleanedCodesCount,
       total: offers.length,
       duration: parseFloat(duration)
     };
@@ -146,26 +268,6 @@ async function syncOffersFromABC() {
       duration: parseFloat(duration)
     };
   }
-}
-
-/**
- * Extrae horarios de los días de la semana
- */
-function extractHorarios(offer) {
-  const dias = ['lunes', 'martes', 'miercoles', 'jueves', 'viernes', 'sabado'];
-  const horarios = [];
-  
-  dias.forEach(dia => {
-    const horario = offer[dia];
-    if (horario && String(horario).trim() !== '') {
-      horarios.push({
-        dia: dia.charAt(0).toUpperCase() + dia.slice(1),
-        hora: String(horario).trim()
-      });
-    }
-  });
-  
-  return horarios;
 }
 
 module.exports = { syncOffersFromABC };
