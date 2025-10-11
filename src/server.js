@@ -1,199 +1,223 @@
-// ========================================
-// APD BACKEND SERVER
-// Sistema de notificaciones para docentes
-// ========================================
-
-require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const helmet = require('helmet');
-const { testConnection } = require('./config/database');
-const { startCronJobs } = require('../jobs/scheduler');
-const requestIdMiddleware = require('./middleware/requestId');
-const basicAuth = require('./middleware/basicAuth');
+const cron = require('node-cron');
+const { v4: uuidv4 } = require('uuid');
+
+// Importar configuraciones
+const pool = require('./config/database');
+
+// Importar rutas
+const authRoutes = require('./routes/auth');
+const preferencesRoutes = require('./routes/preferences');
+const offersRoutes = require('./routes/offers');
+
+// Importar jobs
+const { syncOffersFromABC } = require('../jobs/syncOffers');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ========================================
-// MIDDLEWARE DE SEGURIDAD
-// ========================================
+// ======================
+// MIDDLEWARE - REQUEST ID
+// ======================
+app.use((req, res, next) => {
+  req.id = uuidv4();
+  res.setHeader('X-Request-ID', req.id);
+  next();
+});
 
-// 1. Request ID (PRIMERO - para logs)
-app.use(requestIdMiddleware);
-
-// 2. Helmet - Headers de seguridad
-app.use(helmet({
-  contentSecurityPolicy: {
-    directives: {
-      defaultSrc: ["'self'"],
-      styleSrc: ["'self'", "'unsafe-inline'"],
-      imgSrc: ["'self'", "data:", "https:"],
-      scriptSrc: ["'self'"],
-      connectSrc: ["'self'", "https://apd-backend.onrender.com"],
-    },
-  },
-  crossOriginEmbedderPolicy: false,
-  crossOriginResourcePolicy: { policy: "cross-origin" },
-}));
-
-// 3. CORS con whitelist
-const allowedOrigins = process.env.NODE_ENV === 'production' 
-  ? [
-      'https://apd-backend.onrender.com',
-      'exp://localhost:8081',
-      // Agregar dominio de app cuando esté publicada
-    ]
-  : [
-      'http://localhost:3000',
-      'http://localhost:19006',
-      'exp://localhost:8081',
-      'exp://192.168.0.0',
-    ];
+// ======================
+// MIDDLEWARE - CORS
+// ======================
+const allowedOrigins = [
+  'http://localhost:8081',
+  'http://localhost:19006',
+  'http://localhost:19000',
+  'http://localhost:3000'
+];
 
 app.use(cors({
   origin: function (origin, callback) {
-    // Permitir requests sin origin (mobile apps, Postman)
+    // Permitir requests sin origin (mobile apps, Postman, Thunder Client)
     if (!origin) return callback(null, true);
     
-    // Permitir origins de la whitelist
+    // Permitir orígenes en whitelist
     if (allowedOrigins.includes(origin)) {
-      callback(null, true);
-    } else if (origin.startsWith('exp://')) {
-      // Permitir cualquier Expo Go en desarrollo
-      callback(null, true);
-    } else {
-      console.warn(`[${new Date().toISOString()}] CORS blocked: ${origin}`);
-      callback(new Error('No permitido por CORS'));
+      return callback(null, true);
     }
+    
+    // En desarrollo, permitir todos (comentar en producción)
+    return callback(null, true);
   },
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-ID'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS']
 }));
 
-// ========================================
-// MIDDLEWARE BÁSICO
-// ========================================
+// ======================
+// MIDDLEWARE - BASIC AUTH (para endpoints admin)
+// ======================
+const basicAuth = (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  
+  if (!authHeader || !authHeader.startsWith('Basic ')) {
+    res.setHeader('WWW-Authenticate', 'Basic realm="APD Backend"');
+    return res.status(401).json({ 
+      success: false, 
+      message: 'Autenticación requerida' 
+    });
+  }
 
+  const base64Credentials = authHeader.split(' ')[1];
+  const credentials = Buffer.from(base64Credentials, 'base64').toString('ascii');
+  const [username, password] = credentials.split(':');
+
+  const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'apd_admin';
+  const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
+
+  if (username === ADMIN_USERNAME && password === ADMIN_PASSWORD) {
+    next();
+  } else {
+    res.setHeader('WWW-Authenticate', 'Basic realm="APD Backend"');
+    return res.status(401).json({ 
+      success: false, 
+      message: 'Credenciales inválidas' 
+    });
+  }
+};
+
+// ======================
+// MIDDLEWARE - BODY PARSER
+// ======================
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// ========================================
-// RUTAS
-// ========================================
+// ======================
+// RUTAS PÚBLICAS
+// ======================
 
-app.use('/api/auth', require('./routes/auth'));
-app.use('/api/preferences', require('./routes/preferences'));
-app.use('/api/offers', require('./routes/offers'));
-
-// Ruta raíz protegida con Basic Auth
+// Health check (protegido con Basic Auth)
 app.get('/', basicAuth, (req, res) => {
-  res.json({ 
-    message: 'APD Backend API', 
-    status: 'running',
-    version: '1.2.0',
+  res.json({
+    success: true,
+    message: 'APD Backend API',
+    version: '2.0',
     timestamp: new Date().toISOString(),
-    requestId: req.id
+    environment: process.env.NODE_ENV || 'development'
   });
 });
 
-// ========================================
-// ERROR HANDLERS
-// ========================================
+// API Routes
+app.use('/api/auth', authRoutes);
+app.use('/api/preferences', preferencesRoutes);
+app.use('/api/offers', offersRoutes);
 
-// 404 Handler - Debe ir DESPUÉS de todas las rutas
-app.use((req, res, next) => {
-  res.status(404).json({
-    success: false,
-    message: 'Endpoint no encontrado',
-    path: req.path,
-    method: req.method,
-    requestId: req.id,
-  });
-});
-
-// Error Handler Global - Debe ir AL FINAL
+// ======================
+// ERROR HANDLER GLOBAL
+// ======================
 app.use((err, req, res, next) => {
-  // Log del error con request ID
-  console.error(`[${req.id || 'NO-ID'}] Error en ${req.method} ${req.path}:`, {
-    message: err.message,
-    stack: process.env.NODE_ENV === 'development' ? err.stack : undefined,
-    body: req.body,
-    timestamp: new Date().toISOString(),
-  });
+  console.error(`[${req.id}] Error:`, err.message);
+  console.error(err.stack);
 
-  // Errores de validación Joi
+  // Error de validación (Joi)
   if (err.name === 'ValidationError') {
     return res.status(400).json({
       success: false,
       message: 'Error de validación',
-      errors: err.details || err.message,
-      requestId: req.id,
+      errors: err.details?.map(d => d.message) || [err.message]
     });
   }
 
-  // Errores de JWT
+  // Error de JWT
   if (err.name === 'JsonWebTokenError') {
     return res.status(401).json({
       success: false,
-      message: 'Token inválido',
-      requestId: req.id,
+      message: 'Token inválido'
     });
   }
 
   if (err.name === 'TokenExpiredError') {
     return res.status(401).json({
       success: false,
-      message: 'Token expirado',
-      requestId: req.id,
+      message: 'Token expirado'
     });
   }
 
-  // Errores de rate limiting
-  if (err.status === 429) {
-    return res.status(429).json({
-      success: false,
-      message: 'Demasiados intentos, intenta más tarde',
-      retryAfter: err.retryAfter,
-      requestId: req.id,
-    });
-  }
-
-  // Errores de CORS
-  if (err.message && err.message.includes('CORS')) {
-    return res.status(403).json({
-      success: false,
-      message: 'Acceso no permitido',
-      requestId: req.id,
-    });
-  }
-
-  // Error genérico (no exponer detalles en producción)
+  // Error genérico
   res.status(err.status || 500).json({
     success: false,
     message: process.env.NODE_ENV === 'production' 
       ? 'Error interno del servidor' 
       : err.message,
-    requestId: req.id,
+    requestId: req.id
   });
 });
 
-// ========================================
-// INICIALIZACIÓN
-// ========================================
-
-testConnection();
-startCronJobs();
-
-app.listen(PORT, () => {
-  console.log(`========================================`);
-  console.log(`🚀 Servidor APD Backend iniciado`);
-  console.log(`========================================`);
-  console.log(`Puerto: ${PORT}`);
-  console.log(`Entorno: ${process.env.NODE_ENV || 'development'}`);
-  console.log(`Timestamp: ${new Date().toISOString()}`);
-  console.log(`========================================\n`);
+// 404 - Ruta no encontrada
+app.use((req, res) => {
+  res.status(404).json({
+    success: false,
+    message: 'Ruta no encontrada',
+    path: req.path
+  });
 });
 
-module.exports = app;
+// ======================
+// CRON JOBS
+// ======================
+
+// Sync ofertas - 15:00 hs Argentina (post-adjudicación)
+cron.schedule('0 15 * * *', async () => {
+  console.log('🕐 [CRON] Iniciando sync 15:00 hs...');
+  await syncOffersFromABC();
+}, {
+  timezone: 'America/Argentina/Buenos_Aires'
+});
+
+// Sync ofertas - 20:00 hs Argentina (actualizaciones tardías)
+cron.schedule('0 20 * * *', async () => {
+  console.log('🕐 [CRON] Iniciando sync 20:00 hs...');
+  await syncOffersFromABC();
+}, {
+  timezone: 'America/Argentina/Buenos_Aires'
+});
+
+// TODO: Push notifications - 21:00 hs Argentina
+// cron.schedule('0 21 * * *', async () => {
+//   console.log('🕐 [CRON] Enviando notificaciones push 21:00 hs...');
+//   await sendDailyNotifications();
+// }, {
+//   timezone: 'America/Argentina/Buenos_Aires'
+// });
+
+// ======================
+// INICIAR SERVIDOR
+// ======================
+app.listen(PORT, async () => {
+  console.log(`✅ [SERVER] Corriendo en puerto ${PORT}`);
+  console.log(`✅ [ENV] ${process.env.NODE_ENV || 'development'}`);
+  console.log(`✅ [CORS] Configurado`);
+  
+  // Verificar conexión a DB
+  try {
+    const result = await pool.query('SELECT NOW()');
+    console.log(`✅ [DATABASE] Conectado - ${result.rows[0].now}`);
+  } catch (error) {
+    console.error('❌ [DATABASE] Error de conexión:', error.message);
+  }
+  
+  console.log('🕐 [CRON] Jobs programados: 15:00, 20:00 (timezone Argentina)');
+});
+
+// Manejo de señales de terminación
+process.on('SIGTERM', () => {
+  console.log('👋 [SERVER] SIGTERM recibido, cerrando servidor...');
+  pool.end();
+  process.exit(0);
+});
+
+process.on('SIGINT', () => {
+  console.log('👋 [SERVER] SIGINT recibido, cerrando servidor...');
+  pool.end();
+  process.exit(0);
+});
