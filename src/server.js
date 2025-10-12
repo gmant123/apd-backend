@@ -111,6 +111,7 @@ app.get('/', basicAuth, (req, res) => {
 app.use('/api/auth', authRoutes);
 app.use('/api/preferences', preferencesRoutes);
 app.use('/api/offers', offersRoutes);
+app.use('/api/users', require('./routes/users'));
 
 // ======================
 // ERROR HANDLER GLOBAL
@@ -221,3 +222,4 @@ process.on('SIGINT', () => {
   pool.end();
   process.exit(0);
 });
+
