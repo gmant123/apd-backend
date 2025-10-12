@@ -13,6 +13,8 @@ const offersRoutes = require('./routes/offers');
 
 // Importar jobs
 const { syncOffersFromABC } = require('../jobs/syncOffers');
+const { sendDailyNotifications } = require('../jobs/notifications');
+const { initializeFirebase } = require('../services/firebase');
 
 const app = express();
 app.set('trust proxy', 1);
@@ -184,13 +186,13 @@ cron.schedule('0 20 * * *', async () => {
   timezone: 'America/Argentina/Buenos_Aires'
 });
 
-// TODO: Push notifications - 21:00 hs Argentina
-// cron.schedule('0 21 * * *', async () => {
-//   console.log('🕐 [CRON] Enviando notificaciones push 21:00 hs...');
-//   await sendDailyNotifications();
-// }, {
-//   timezone: 'America/Argentina/Buenos_Aires'
-// });
+// Push notifications - 21:00 hs Argentina
+cron.schedule('0 21 * * *', async () => {
+  console.log('🕐 [CRON] Enviando notificaciones push 21:00 hs...');
+  await sendDailyNotifications();
+}, {
+  timezone: 'America/Argentina/Buenos_Aires'
+});
 
 // ======================
 // INICIAR SERVIDOR
@@ -208,7 +210,14 @@ app.listen(PORT, async () => {
     console.error('❌ [DATABASE] Error de conexión:', error.message);
   }
   
-  console.log('🕐 [CRON] Jobs programados: 15:00, 20:00 (timezone Argentina)');
+  // Inicializar Firebase
+  try {
+    initializeFirebase();
+  } catch (error) {
+    console.error('❌ [FIREBASE] Error de inicialización:', error.message);
+  }
+  
+  console.log('🕐 [CRON] Jobs programados: 15:00, 20:00, 21:00 (timezone Argentina)');
 });
 
 // Manejo de señales de terminación
@@ -223,4 +232,3 @@ process.on('SIGINT', () => {
   pool.end();
   process.exit(0);
 });
-
