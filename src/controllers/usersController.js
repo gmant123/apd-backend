@@ -27,8 +27,8 @@ const saveDeviceToken = async (req, res) => {
   try {
     // Actualizar el device_token del usuario
     const result = await pool.query(
-      'UPDATE users SET device_token = $1, updated_at = NOW() WHERE id = $2 RETURNING id, email, device_token',
-      [device_token, userId]
+    'UPDATE users SET device_token = $1, updated_at = NOW() WHERE id = $2 RETURNING id, email, device_token',
+    [device_token, userId]
     );
 
     if (result.rows.length === 0) {
@@ -67,9 +67,9 @@ const deleteDeviceToken = async (req, res) => {
 
   try {
     await pool.query(
-      'UPDATE users SET device_token = NULL, updated_at = NOW() WHERE id = $1',
-      [userId]
-    );
+  'UPDATE users SET device_token = NULL, updated_at = NOW() WHERE id = $1',
+  [userId]
+  );
 
     console.log(`[${req.id}] Device token eliminado para usuario ${userId}`);
 
