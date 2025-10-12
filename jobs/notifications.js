@@ -1,7 +1,7 @@
 /**
  * Job de Notificaciones Diarias
  * Se ejecuta a las 21:00 hs (configurado en scheduler.js)
- * Envía push notification a usuarios con ofertas nuevas
+ * Envía push notification a usuarios con ofertas disponibles
  */
 
 const { query } = require('../src/config/database');
@@ -9,9 +9,9 @@ const { sendBatchNotifications, sendPushNotification } = require('../services/fi
 
 /**
  * Enviar notificaciones diarias a las 21:00
- * - Obtiene usuarios activos con notif_diaria = true
- * - Cuenta ofertas nuevas para cada usuario
- * - Envía push notification si hay ofertas nuevas
+ * - Obtiene usuarios activos con notificaciones habilitadas
+ * - Cuenta ofertas disponibles para cada usuario
+ * - Envía push notification si hay ofertas
  */
 async function sendDailyNotifications() {
   console.log('🔔 Iniciando envío de notificaciones diarias...');
@@ -47,19 +47,19 @@ async function sendDailyNotifications() {
     let skipped = 0;
     const notifications = []; // Para batch notifications
 
-    // 2. Para cada usuario, contar ofertas nuevas
+    // 2. Para cada usuario, contar ofertas disponibles
     for (const user of users) {
       try {
         const offersResult = await query(`
           SELECT COUNT(*) as count
           FROM user_offers
-          WHERE user_id = $1 AND is_new = true
+          WHERE user_id = $1
         `, [user.id]);
 
-        const newOffersCount = parseInt(offersResult.rows[0].count) || 0;
+        const offersCount = parseInt(offersResult.rows[0].count) || 0;
 
-        if (newOffersCount === 0) {
-          console.log(`   ⏭️  Usuario ${user.dni} (${user.nombre}): sin ofertas nuevas`);
+        if (offersCount === 0) {
+          console.log(`   ⏭️  Usuario ${user.dni} (${user.nombre}): sin ofertas disponibles`);
           skipped++;
           continue;
         }
@@ -69,10 +69,10 @@ async function sendDailyNotifications() {
           token: user.device_token,
           userId: user.id,
           userName: user.nombre,
-          count: newOffersCount,
+          count: offersCount,
         });
 
-        console.log(`   ✅ Usuario ${user.dni} (${user.nombre}): ${newOffersCount} oferta${newOffersCount > 1 ? 's' : ''} nueva${newOffersCount > 1 ? 's' : ''}`);
+        console.log(`   ✅ Usuario ${user.dni} (${user.nombre}): ${offersCount} oferta${offersCount > 1 ? 's' : ''} disponible${offersCount > 1 ? 's' : ''}`);
         notified++;
 
       } catch (error) {
@@ -97,12 +97,12 @@ async function sendDailyNotifications() {
       const result = await sendBatchNotifications(
         tokens,
         {
-          title: 'Nuevas ofertas APD',
-          body: 'Tenés ofertas nuevas disponibles. ¡Revisalas ahora!',
+          title: 'APD Ofertas',
+          body: 'Hay ofertas disponibles para vos el dia de hoy - ¡Abrí APD Ofertas!',
         },
         {
           screen: 'Ofertas',
-          badge: '1', // String porque data solo acepta strings
+          badge: '1',
         }
       );
 
@@ -116,7 +116,7 @@ async function sendDailyNotifications() {
           await query(`
             UPDATE user_offers
             SET notified_at = NOW()
-            WHERE user_id = $1 AND is_new = true
+            WHERE user_id = $1
           `, [notif.userId]);
         } catch (error) {
           console.error(`   ⚠️  Error marcando como notificado usuario ${notif.userId}`);
@@ -124,7 +124,7 @@ async function sendDailyNotifications() {
       }
 
     } else {
-      // Opción 2: Individual (mejor para pocos usuarios, mensaje personalizado)
+      // Opción 2: Individual (mejor para pocos usuarios, mensaje personalizado con número)
       let successCount = 0;
       let failureCount = 0;
 
@@ -133,8 +133,8 @@ async function sendDailyNotifications() {
           const success = await sendPushNotification(
             notif.token,
             {
-              title: 'Nuevas ofertas APD',
-              body: `Tenés ${notif.count} oferta${notif.count > 1 ? 's' : ''} nueva${notif.count > 1 ? 's' : ''}`,
+              title: 'APD Ofertas',
+              body: `Hay ${notif.count} oferta${notif.count > 1 ? 's' : ''} para vos el dia de hoy - ¡Abrí APD Ofertas!`,
             },
             {
               screen: 'Ofertas',
@@ -149,7 +149,7 @@ async function sendDailyNotifications() {
             await query(`
               UPDATE user_offers
               SET notified_at = NOW()
-              WHERE user_id = $1 AND is_new = true
+              WHERE user_id = $1
             `, [notif.userId]);
           } else {
             failureCount++;
