@@ -5,7 +5,11 @@
  */
 
 const { query } = require('../src/config/database');
-const { sendBatchNotifications, sendPushNotification } = require('../services/firebase');
+const {
+  initializeFirebase,
+  sendBatchNotifications,
+  sendPushNotification,
+} = require('../services/firebase');
 
 /**
  * Enviar notificaciones diarias a las 21:00
@@ -16,6 +20,17 @@ const { sendBatchNotifications, sendPushNotification } = require('../services/fi
 async function sendDailyNotifications() {
   console.log('🔔 Iniciando envío de notificaciones diarias...');
   const startTime = Date.now();
+
+  // Asegurar Firebase inicializado (el job corre sin arrancar el server)
+  try {
+    initializeFirebase();
+  } catch (e) {
+    // Ignorar si ya estaba inicializado
+    const msg = (e && e.message) || '';
+    if (!/already exists|duplicate-app/i.test(msg)) {
+      throw e;
+    }
+  }
 
   try {
     // 1) Usuarios activos con notificaciones habilitadas y token presente
@@ -47,11 +62,9 @@ async function sendDailyNotifications() {
     let skipped = 0;
     const notifications = [];
 
-    // 2) Para cada usuario, contar ofertas disponibles (según tu lógica actual)
+    // 2) Para cada usuario, contar ofertas disponibles (criterio actual)
     for (const user of users) {
       try {
-        // Mantengo tu criterio actual: contar en user_offers por user_id
-        // (si luego querés filtrar por estado "publicada" o por fecha, lo ajustamos)
         const offersResult = await query(
           `SELECT COUNT(*) AS count FROM user_offers WHERE user_id = $1`,
           [user.id]
@@ -103,13 +116,18 @@ async function sendDailyNotifications() {
         },
         {
           screen: 'Ofertas',
-          badge: '1', // en data debe ir string
+          badge: '1', // data siempre string
         }
       );
 
       console.log(`✅ Notificaciones batch enviadas:`);
       console.log(`   Success: ${result.success}`);
       console.log(`   Failure: ${result.failure}`);
+
+      // Si absolutamente todas fallaron, falla el job (útil para shell)
+      if ((result.success || 0) === 0) {
+        throw new Error('Todas las notificaciones batch fallaron');
+      }
 
       // Marcar como notificadas para cada user
       for (const notif of notifications) {
@@ -159,6 +177,10 @@ async function sendDailyNotifications() {
       console.log(`✅ Notificaciones individuales completadas:`);
       console.log(`   Success: ${successCount}`);
       console.log(`   Failure: ${failureCount}`);
+
+      if (successCount === 0) {
+        throw new Error('Todas las notificaciones individuales fallaron');
+      }
     }
 
     const duration = ((Date.now() - startTime) / 1000).toFixed(2);
@@ -188,6 +210,17 @@ async function sendDailyNotifications() {
  */
 async function sendTestNotification(userId) {
   console.log(`🧪 Enviando notificación de prueba a usuario ${userId}...`);
+
+  // Asegurar Firebase inicializado
+  try {
+    initializeFirebase();
+  } catch (e) {
+    const msg = (e && e.message) || '';
+    if (!/already exists|duplicate-app/i.test(msg)) {
+      throw e;
+    }
+  }
+
   try {
     const userResult = await query(
       `SELECT id, email, nombre, device_token FROM users WHERE id = $1`,
