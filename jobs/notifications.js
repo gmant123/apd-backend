@@ -1,6 +1,6 @@
 /**
  * Job de Notificaciones Diarias
- * Se ejecuta a las 21:00 hs (configurado en scheduler.js)
+ * Se ejecuta a las 21:00 hs (configurado en server.js)
  * Envía push notification a usuarios con ofertas disponibles
  */
 
@@ -18,21 +18,21 @@ async function sendDailyNotifications() {
   const startTime = Date.now();
 
   try {
-    // 1. Obtener usuarios activos con notificaciones habilitadas
+    // 1) Usuarios activos con notificaciones habilitadas y token presente
     const usersResult = await query(`
       SELECT 
         u.id,
-        u.dni,
+        u.email,
         u.nombre,
         u.device_token,
-        up.notif_diaria
+        COALESCE(up.notif_diaria, true) AS notif_diaria
       FROM users u
-      LEFT JOIN user_preferences up ON u.id = up.user_id
+      LEFT JOIN user_preferences up ON up.user_id = u.id
       WHERE 
         u.is_active = true 
         AND u.device_token IS NOT NULL 
-        AND u.device_token != ''
-        AND (up.notif_diaria IS NULL OR up.notif_diaria = true)
+        AND u.device_token <> ''
+        AND COALESCE(up.notif_diaria, true) = true
     `);
 
     const users = usersResult.rows;
@@ -45,43 +45,45 @@ async function sendDailyNotifications() {
 
     let notified = 0;
     let skipped = 0;
-    const notifications = []; // Para batch notifications
+    const notifications = [];
 
-    // 2. Para cada usuario, contar ofertas disponibles
+    // 2) Para cada usuario, contar ofertas disponibles (según tu lógica actual)
     for (const user of users) {
       try {
-        const offersResult = await query(`
-          SELECT COUNT(*) as count
-          FROM user_offers
-          WHERE user_id = $1
-        `, [user.id]);
+        // Mantengo tu criterio actual: contar en user_offers por user_id
+        // (si luego querés filtrar por estado "publicada" o por fecha, lo ajustamos)
+        const offersResult = await query(
+          `SELECT COUNT(*) AS count FROM user_offers WHERE user_id = $1`,
+          [user.id]
+        );
 
-        const offersCount = parseInt(offersResult.rows[0].count) || 0;
+        const offersCount = parseInt(offersResult.rows[0].count, 10) || 0;
 
         if (offersCount === 0) {
-          console.log(`   ⏭️  Usuario ${user.dni} (${user.nombre}): sin ofertas disponibles`);
+          console.log(`   ⏭️  Usuario ${user.id} (${user.email || 'sin-email'}): sin ofertas`);
           skipped++;
           continue;
         }
 
-        // Agregar a lista de notificaciones
         notifications.push({
           token: user.device_token,
           userId: user.id,
+          userEmail: user.email,
           userName: user.nombre,
           count: offersCount,
         });
 
-        console.log(`   ✅ Usuario ${user.dni} (${user.nombre}): ${offersCount} oferta${offersCount > 1 ? 's' : ''} disponible${offersCount > 1 ? 's' : ''}`);
+        console.log(
+          `   ✅ Usuario ${user.id} (${user.email || 'sin-email'}): ${offersCount} oferta${offersCount > 1 ? 's' : ''}`
+        );
         notified++;
-
-      } catch (error) {
-        console.error(`   ❌ Error procesando usuario ${user.dni}:`, error.message);
+      } catch (err) {
+        console.error(`   ❌ Error procesando usuario ${user.id}:`, err.message);
         skipped++;
       }
     }
 
-    // 3. Enviar notificaciones
+    // 3) Enviar notificaciones
     if (notifications.length === 0) {
       console.log('⚠️  No hay notificaciones para enviar');
       return { success: true, notified: 0, skipped: users.length };
@@ -89,11 +91,10 @@ async function sendDailyNotifications() {
 
     console.log(`\n📤 Enviando ${notifications.length} notificaciones...`);
 
-    // Opción 1: Batch (más eficiente para muchos usuarios)
     if (notifications.length > 5) {
-      const tokens = notifications.map(n => n.token);
-      
-      // Título y body genérico (Firebase no permite personalizar por token en batch)
+      // Batch: mismo título/body para todos
+      const tokens = notifications.map((n) => n.token);
+
       const result = await sendBatchNotifications(
         tokens,
         {
@@ -102,7 +103,7 @@ async function sendDailyNotifications() {
         },
         {
           screen: 'Ofertas',
-          badge: '1',
+          badge: '1', // en data debe ir string
         }
       );
 
@@ -110,27 +111,25 @@ async function sendDailyNotifications() {
       console.log(`   Success: ${result.success}`);
       console.log(`   Failure: ${result.failure}`);
 
-      // Marcar como notificadas
+      // Marcar como notificadas para cada user
       for (const notif of notifications) {
         try {
-          await query(`
-            UPDATE user_offers
-            SET notified_at = NOW()
-            WHERE user_id = $1
-          `, [notif.userId]);
-        } catch (error) {
-          console.error(`   ⚠️  Error marcando como notificado usuario ${notif.userId}`);
+          await query(
+            `UPDATE user_offers SET notified_at = NOW() WHERE user_id = $1`,
+            [notif.userId]
+          );
+        } catch (err) {
+          console.error(`   ⚠️  Error marcando notificado user ${notif.userId}:`, err.message);
         }
       }
-
     } else {
-      // Opción 2: Individual (mejor para pocos usuarios, mensaje personalizado con número)
+      // Individual: permite personalizar el body con el count
       let successCount = 0;
       let failureCount = 0;
 
       for (const notif of notifications) {
         try {
-          const success = await sendPushNotification(
+          const ok = await sendPushNotification(
             notif.token,
             {
               title: 'APD Ofertas',
@@ -138,25 +137,21 @@ async function sendDailyNotifications() {
             },
             {
               screen: 'Ofertas',
-              badge: String(notif.count),
+              badge: String(notif.count), // en data siempre string
             }
           );
 
-          if (success) {
+          if (ok) {
             successCount++;
-            
-            // Marcar como notificadas
-            await query(`
-              UPDATE user_offers
-              SET notified_at = NOW()
-              WHERE user_id = $1
-            `, [notif.userId]);
+            await query(
+              `UPDATE user_offers SET notified_at = NOW() WHERE user_id = $1`,
+              [notif.userId]
+            );
           } else {
             failureCount++;
           }
-
-        } catch (error) {
-          console.error(`   ❌ Error enviando a usuario ${notif.userId}:`, error.message);
+        } catch (err) {
+          console.error(`   ❌ Error enviando a user ${notif.userId}:`, err.message);
           failureCount++;
         }
       }
@@ -173,22 +168,17 @@ async function sendDailyNotifications() {
 
     return {
       success: true,
-      notified: notified,
-      skipped: skipped,
+      notified,
+      skipped,
       total: users.length,
       duration: parseFloat(duration),
     };
-
   } catch (error) {
     const duration = ((Date.now() - startTime) / 1000).toFixed(2);
     console.error(`❌ Error en sendDailyNotifications (${duration}s):`, error.message);
     console.error(error.stack);
-    
-    return {
-      success: false,
-      error: error.message,
-      duration: parseFloat(duration),
-    };
+    // Importante: relanzar para que el proceso salga con código de error
+    throw error;
   }
 }
 
@@ -198,13 +188,11 @@ async function sendDailyNotifications() {
  */
 async function sendTestNotification(userId) {
   console.log(`🧪 Enviando notificación de prueba a usuario ${userId}...`);
-
   try {
-    const userResult = await query(`
-      SELECT id, dni, nombre, device_token
-      FROM users
-      WHERE id = $1
-    `, [userId]);
+    const userResult = await query(
+      `SELECT id, email, nombre, device_token FROM users WHERE id = $1`,
+      [userId]
+    );
 
     if (userResult.rows.length === 0) {
       throw new Error(`Usuario ${userId} no encontrado`);
@@ -213,14 +201,14 @@ async function sendTestNotification(userId) {
     const user = userResult.rows[0];
 
     if (!user.device_token) {
-      throw new Error(`Usuario ${user.dni} no tiene device_token registrado`);
+      throw new Error(`Usuario ${user.id} no tiene device_token registrado`);
     }
 
-    const success = await sendPushNotification(
+    const ok = await sendPushNotification(
       user.device_token,
       {
         title: '🧪 Test APD Ofertas',
-        body: `Hola ${user.nombre}, esta es una notificación de prueba`,
+        body: `Hola ${user.nombre || 'docente'}, esta es una notificación de prueba`,
       },
       {
         screen: 'Home',
@@ -228,14 +216,13 @@ async function sendTestNotification(userId) {
       }
     );
 
-    if (success) {
-      console.log(`✅ Notificación de prueba enviada a ${user.nombre} (${user.dni})`);
+    if (ok) {
+      console.log(`✅ Notificación de prueba enviada a ${user.email || user.id}`);
     } else {
-      console.log(`❌ No se pudo enviar notificación a ${user.nombre}`);
+      console.log(`❌ No se pudo enviar notificación a ${user.email || user.id}`);
     }
 
-    return success;
-
+    return ok;
   } catch (error) {
     console.error('❌ Error en sendTestNotification:', error.message);
     throw error;
