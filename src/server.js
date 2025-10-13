@@ -3,10 +3,8 @@ const cors = require('cors');
 const cron = require('node-cron');
 const { v4: uuidv4 } = require('uuid');
 
-// Config
+// Config & rutas
 const pool = require('./config/database');
-
-// Rutas
 const authRoutes = require('./routes/auth');
 const preferencesRoutes = require('./routes/preferences');
 const offersRoutes = require('./routes/offers');
@@ -20,9 +18,10 @@ const { initializeFirebase } = require('../services/firebase');
 const app = express();
 app.set('trust proxy', 1);
 const PORT = process.env.PORT || 3000;
+const AR_TZ = 'America/Argentina/Buenos_Aires';
 
 // ======================
-// REQUEST ID
+// REQUEST-ID
 // ======================
 app.use((req, res, next) => {
   req.id = uuidv4();
@@ -31,8 +30,7 @@ app.use((req, res, next) => {
 });
 
 // ======================
-// CORS
-// ======================
+/* CORS (whitelist + permitir sin origin: apps móviles) */
 const allowedOrigins = [
   'http://localhost:8081',
   'http://localhost:19006',
@@ -42,10 +40,11 @@ const allowedOrigins = [
 
 app.use(
   cors({
-    origin: function (origin, callback) {
-      if (!origin) return callback(null, true); // mobile/Postman
-      if (allowedOrigins.includes(origin)) return callback(null, true);
-      return callback(null, true); // permitir en dev
+    origin(origin, cb) {
+      if (!origin) return cb(null, true);
+      if (allowedOrigins.includes(origin)) return cb(null, true);
+      // En dev, permitir todo; en prod, comentar la línea:
+      return cb(null, true);
     },
     credentials: true,
     allowedHeaders: ['Content-Type', 'Authorization'],
@@ -54,30 +53,26 @@ app.use(
 );
 
 // ======================
-// BASIC AUTH (para endpoints admin públicos, como /)
+// BASIC AUTH (para endpoints internos)
 // ======================
 const basicAuth = (req, res, next) => {
-  const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Basic ')) {
+  const hdr = req.headers.authorization;
+  if (!hdr || !hdr.startsWith('Basic ')) {
     res.setHeader('WWW-Authenticate', 'Basic realm="APD Backend"');
     return res.status(401).json({ success: false, message: 'Autenticación requerida' });
   }
-  const base64Credentials = authHeader.split(' ')[1];
-  const credentials = Buffer.from(base64Credentials, 'base64').toString('ascii');
-  const [username, password] = credentials.split(':');
+  const [username, password] = Buffer.from(hdr.split(' ')[1], 'base64')
+    .toString('ascii')
+    .split(':');
 
   const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'apd_admin';
   const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
 
-  if (username === ADMIN_USERNAME && password === ADMIN_PASSWORD) {
-    return next();
-  }
+  if (username === ADMIN_USERNAME && password === ADMIN_PASSWORD) return next();
   res.setHeader('WWW-Authenticate', 'Basic realm="APD Backend"');
   return res.status(401).json({ success: false, message: 'Credenciales inválidas' });
 };
 
-// ======================
-// BODY PARSER
 // ======================
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -85,9 +80,7 @@ app.use(express.urlencoded({ extended: true }));
 // ======================
 // RUTAS
 // ======================
-
-// Health (protegido)
-app.get('/', basicAuth, (req, res) => {
+app.get('/', basicAuth, (_req, res) => {
   res.json({
     success: true,
     message: 'APD Backend API',
@@ -103,25 +96,31 @@ app.use('/api/offers', offersRoutes);
 app.use('/api/users', usersRoutes);
 
 // ======================
+// ENDPOINT de observabilidad simple para cron
+// ======================
+let lastRuns = {
+  sync1205: null,
+  sync1705: null,
+  sync2045: null,
+  push2100: null,
+};
+
+app.get('/internal/cron-status', basicAuth, (_req, res) => {
+  res.json({ success: true, lastRuns });
+});
+
+// ======================
 // ERROR HANDLER
 // ======================
-app.use((err, req, res, next) => {
-  console.error(`[${req.id}] Error:`, err.message);
-  console.error(err.stack);
-
-  if (err.name === 'ValidationError') {
-    return res.status(400).json({
-      success: false,
-      message: 'Error de validación',
-      errors: err.details?.map((d) => d.message) || [err.message],
-    });
-  }
-  if (err.name === 'JsonWebTokenError') {
+app.use((err, req, res, _next) => {
+  console.error(`[${req.id}]`, err);
+  if (err.name === 'ValidationError')
+    return res.status(400).json({ success: false, message: 'Error de validación', errors: err.details?.map(d => d.message) });
+  if (err.name === 'JsonWebTokenError')
     return res.status(401).json({ success: false, message: 'Token inválido' });
-  }
-  if (err.name === 'TokenExpiredError') {
+  if (err.name === 'TokenExpiredError')
     return res.status(401).json({ success: false, message: 'Token expirado' });
-  }
+
   res.status(err.status || 500).json({
     success: false,
     message: process.env.NODE_ENV === 'production' ? 'Error interno del servidor' : err.message,
@@ -129,76 +128,59 @@ app.use((err, req, res, next) => {
   });
 });
 
-// 404
-app.use((req, res) => {
-  res.status(404).json({ success: false, message: 'Ruta no encontrada', path: req.path });
-});
+app.use((req, res) => res.status(404).json({ success: false, message: 'Ruta no encontrada', path: req.path }));
 
 // ======================
-/* CRON JOBS */
+// CRON JOBS (Argentina)
+// ======================
+// ⏱️ Sincronizaciones por turnos (Lun–Vie)
+cron.schedule('5 12 * * 1-5', async () => {
+  console.log('🕐 [CRON 12:05] Sync ABC (mañana) …');
+  await syncOffersFromABC();
+  lastRuns.sync1205 = new Date().toISOString();
+}, { timezone: AR_TZ });
 
-// 15:00 — sync post-adjudicación
-cron.schedule(
-  '0 15 * * *',
-  async () => {
-    console.log('🕐 [CRON] Iniciando sync 15:00 hs...');
-    await syncOffersFromABC();
-  },
-  { timezone: 'America/Argentina/Buenos_Aires' }
-);
+cron.schedule('5 17 * * 1-5', async () => {
+  console.log('🕐 [CRON 17:05] Sync ABC (tarde) …');
+  await syncOffersFromABC();
+  lastRuns.sync1705 = new Date().toISOString();
+}, { timezone: AR_TZ });
 
-// 20:00 — sync actualizaciones tardías
-cron.schedule(
-  '0 20 * * *',
-  async () => {
-    console.log('🕐 [CRON] Iniciando sync 20:00 hs...');
-    await syncOffersFromABC();
-  },
-  { timezone: 'America/Argentina/Buenos_Aires' }
-);
+cron.schedule('45 20 * * 1-5', async () => {
+  console.log('🕐 [CRON 20:45] Sync ABC (noche, previo a push) …');
+  await syncOffersFromABC();
+  lastRuns.sync2045 = new Date().toISOString();
+}, { timezone: AR_TZ });
 
-// 21:00 — push Dom–Vie (0=Dom … 5=Vie)
-cron.schedule(
-  '0 21 * * 0-5',
-  async () => {
-    console.log('🕐 [CRON] Enviando notificaciones push 21:00 hs (Dom–Vie)...');
-    await sendDailyNotifications();
-  },
-  { timezone: 'America/Argentina/Buenos_Aires' }
-);
+// 🔔 Push diario 21:00 (Lun–Vie)
+// si querés Dom–Vie: usa 0-5
+cron.schedule('0 21 * * 1-5', async () => {
+  console.log('🔔 [CRON 21:00] Push diario …');
+  await sendDailyNotifications();
+  lastRuns.push2100 = new Date().toISOString();
+}, { timezone: AR_TZ });
 
 // ======================
-// START
+// ARRANQUE
 // ======================
 app.listen(PORT, async () => {
-  console.log(`✅ [SERVER] Corriendo en puerto ${PORT}`);
-  console.log(`✅ [ENV] ${process.env.NODE_ENV || 'development'}`);
-  console.log(`✅ [CORS] Configurado`);
-
+  console.log(`✅ [SERVER] Puerto ${PORT}`);
   try {
-    const result = await pool.query('SELECT NOW()');
-    console.log(`✅ [DATABASE] Conectado - ${result.rows[0].now}`);
-  } catch (error) {
-    console.error('❌ [DATABASE] Error de conexión:', error.message);
+    const r = await pool.query('SELECT NOW()');
+    console.log(`✅ [DB] Conectado - ${r.rows[0].now}`);
+  } catch (e) {
+    console.error('❌ [DB] Error conexión:', e.message);
   }
 
   try {
     initializeFirebase();
-  } catch (error) {
-    console.error('❌ [FIREBASE] Error de inicialización:', error.message);
+  } catch (e) {
+    console.error('❌ [FIREBASE] Error init:', e.message);
   }
 
-  console.log('🕐 [CRON] Jobs: 15:00, 20:00, 21:00 (Dom–Vie) TZ America/Argentina/Buenos_Aires');
+  console.log('🕐 [CRON] Programados: 12:05, 17:05, 20:45, 21:00 (AR, Lun–Vie)');
 });
 
 // Señales
-process.on('SIGTERM', () => {
-  console.log('👋 [SERVER] SIGTERM recibido, cerrando servidor...');
-  pool.end();
-  process.exit(0);
-});
-process.on('SIGINT', () => {
-  console.log('👋 [SERVER] SIGINT recibido, cerrando servidor...');
-  pool.end();
-  process.exit(0);
-});
+process.on('SIGTERM', () => { console.log('👋 SIGTERM'); pool.end(); process.exit(0); });
+process.on('SIGINT', () => { console.log('👋 SIGINT'); pool.end(); process.exit(0); });
