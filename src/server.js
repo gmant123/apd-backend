@@ -3,15 +3,16 @@ const cors = require('cors');
 const cron = require('node-cron');
 const { v4: uuidv4 } = require('uuid');
 
-// Importar configuraciones
+// Config
 const pool = require('./config/database');
 
-// Importar rutas
+// Rutas
 const authRoutes = require('./routes/auth');
 const preferencesRoutes = require('./routes/preferences');
 const offersRoutes = require('./routes/offers');
+const usersRoutes = require('./routes/users');
 
-// Importar jobs
+// Jobs
 const { syncOffersFromABC } = require('../jobs/syncOffers');
 const { sendDailyNotifications } = require('../jobs/notifications');
 const { initializeFirebase } = require('../services/firebase');
@@ -21,7 +22,7 @@ app.set('trust proxy', 1);
 const PORT = process.env.PORT || 3000;
 
 // ======================
-// MIDDLEWARE - REQUEST ID
+// REQUEST ID
 // ======================
 app.use((req, res, next) => {
   req.id = uuidv4();
@@ -30,47 +31,37 @@ app.use((req, res, next) => {
 });
 
 // ======================
-// MIDDLEWARE - CORS
+// CORS
 // ======================
 const allowedOrigins = [
   'http://localhost:8081',
   'http://localhost:19006',
   'http://localhost:19000',
-  'http://localhost:3000'
+  'http://localhost:3000',
 ];
 
-app.use(cors({
-  origin: function (origin, callback) {
-    // Permitir requests sin origin (mobile apps, Postman, Thunder Client)
-    if (!origin) return callback(null, true);
-    
-    // Permitir orígenes en whitelist
-    if (allowedOrigins.includes(origin)) {
-      return callback(null, true);
-    }
-    
-    // En desarrollo, permitir todos (comentar en producción)
-    return callback(null, true);
-  },
-  credentials: true,
-  allowedHeaders: ['Content-Type', 'Authorization'],
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS']
-}));
+app.use(
+  cors({
+    origin: function (origin, callback) {
+      if (!origin) return callback(null, true); // mobile/Postman
+      if (allowedOrigins.includes(origin)) return callback(null, true);
+      return callback(null, true); // permitir en dev
+    },
+    credentials: true,
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  })
+);
 
 // ======================
-// MIDDLEWARE - BASIC AUTH (para endpoints admin)
+// BASIC AUTH (para endpoints admin públicos, como /)
 // ======================
 const basicAuth = (req, res, next) => {
   const authHeader = req.headers.authorization;
-  
   if (!authHeader || !authHeader.startsWith('Basic ')) {
     res.setHeader('WWW-Authenticate', 'Basic realm="APD Backend"');
-    return res.status(401).json({ 
-      success: false, 
-      message: 'Autenticación requerida' 
-    });
+    return res.status(401).json({ success: false, message: 'Autenticación requerida' });
   }
-
   const base64Credentials = authHeader.split(' ')[1];
   const credentials = Buffer.from(base64Credentials, 'base64').toString('ascii');
   const [username, password] = credentials.split(':');
@@ -79,154 +70,133 @@ const basicAuth = (req, res, next) => {
   const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
 
   if (username === ADMIN_USERNAME && password === ADMIN_PASSWORD) {
-    next();
-  } else {
-    res.setHeader('WWW-Authenticate', 'Basic realm="APD Backend"');
-    return res.status(401).json({ 
-      success: false, 
-      message: 'Credenciales inválidas' 
-    });
+    return next();
   }
+  res.setHeader('WWW-Authenticate', 'Basic realm="APD Backend"');
+  return res.status(401).json({ success: false, message: 'Credenciales inválidas' });
 };
 
 // ======================
-// MIDDLEWARE - BODY PARSER
+// BODY PARSER
 // ======================
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // ======================
-// RUTAS PÚBLICAS
+// RUTAS
 // ======================
 
-// Health check (protegido con Basic Auth)
+// Health (protegido)
 app.get('/', basicAuth, (req, res) => {
   res.json({
     success: true,
     message: 'APD Backend API',
     version: '2.0',
     timestamp: new Date().toISOString(),
-    environment: process.env.NODE_ENV || 'development'
+    environment: process.env.NODE_ENV || 'development',
   });
 });
 
-// API Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/preferences', preferencesRoutes);
 app.use('/api/offers', offersRoutes);
-app.use('/api/users', require('./routes/users'));
+app.use('/api/users', usersRoutes);
 
 // ======================
-// ERROR HANDLER GLOBAL
+// ERROR HANDLER
 // ======================
 app.use((err, req, res, next) => {
   console.error(`[${req.id}] Error:`, err.message);
   console.error(err.stack);
 
-  // Error de validación (Joi)
   if (err.name === 'ValidationError') {
     return res.status(400).json({
       success: false,
       message: 'Error de validación',
-      errors: err.details?.map(d => d.message) || [err.message]
+      errors: err.details?.map((d) => d.message) || [err.message],
     });
   }
-
-  // Error de JWT
   if (err.name === 'JsonWebTokenError') {
-    return res.status(401).json({
-      success: false,
-      message: 'Token inválido'
-    });
+    return res.status(401).json({ success: false, message: 'Token inválido' });
   }
-
   if (err.name === 'TokenExpiredError') {
-    return res.status(401).json({
-      success: false,
-      message: 'Token expirado'
-    });
+    return res.status(401).json({ success: false, message: 'Token expirado' });
   }
-
-  // Error genérico
   res.status(err.status || 500).json({
     success: false,
-    message: process.env.NODE_ENV === 'production' 
-      ? 'Error interno del servidor' 
-      : err.message,
-    requestId: req.id
+    message: process.env.NODE_ENV === 'production' ? 'Error interno del servidor' : err.message,
+    requestId: req.id,
   });
 });
 
-// 404 - Ruta no encontrada
+// 404
 app.use((req, res) => {
-  res.status(404).json({
-    success: false,
-    message: 'Ruta no encontrada',
-    path: req.path
-  });
+  res.status(404).json({ success: false, message: 'Ruta no encontrada', path: req.path });
 });
 
 // ======================
-// CRON JOBS
+/* CRON JOBS */
+
+// 15:00 — sync post-adjudicación
+cron.schedule(
+  '0 15 * * *',
+  async () => {
+    console.log('🕐 [CRON] Iniciando sync 15:00 hs...');
+    await syncOffersFromABC();
+  },
+  { timezone: 'America/Argentina/Buenos_Aires' }
+);
+
+// 20:00 — sync actualizaciones tardías
+cron.schedule(
+  '0 20 * * *',
+  async () => {
+    console.log('🕐 [CRON] Iniciando sync 20:00 hs...');
+    await syncOffersFromABC();
+  },
+  { timezone: 'America/Argentina/Buenos_Aires' }
+);
+
+// 21:00 — push Dom–Vie (0=Dom … 5=Vie)
+cron.schedule(
+  '0 21 * * 0-5',
+  async () => {
+    console.log('🕐 [CRON] Enviando notificaciones push 21:00 hs (Dom–Vie)...');
+    await sendDailyNotifications();
+  },
+  { timezone: 'America/Argentina/Buenos_Aires' }
+);
+
 // ======================
-
-// Sync ofertas - 15:00 hs Argentina (post-adjudicación)
-cron.schedule('0 15 * * *', async () => {
-  console.log('🕐 [CRON] Iniciando sync 15:00 hs...');
-  await syncOffersFromABC();
-}, {
-  timezone: 'America/Argentina/Buenos_Aires'
-});
-
-// Sync ofertas - 20:00 hs Argentina (actualizaciones tardías)
-cron.schedule('0 20 * * *', async () => {
-  console.log('🕐 [CRON] Iniciando sync 20:00 hs...');
-  await syncOffersFromABC();
-}, {
-  timezone: 'America/Argentina/Buenos_Aires'
-});
-
-// Push notifications - 21:00 hs Argentina
-cron.schedule('0 21 * * *', async () => {
-  console.log('🕐 [CRON] Enviando notificaciones push 21:00 hs...');
-  await sendDailyNotifications();
-}, {
-  timezone: 'America/Argentina/Buenos_Aires'
-});
-
-// ======================
-// INICIAR SERVIDOR
+// START
 // ======================
 app.listen(PORT, async () => {
   console.log(`✅ [SERVER] Corriendo en puerto ${PORT}`);
   console.log(`✅ [ENV] ${process.env.NODE_ENV || 'development'}`);
   console.log(`✅ [CORS] Configurado`);
-  
-  // Verificar conexión a DB
+
   try {
     const result = await pool.query('SELECT NOW()');
     console.log(`✅ [DATABASE] Conectado - ${result.rows[0].now}`);
   } catch (error) {
     console.error('❌ [DATABASE] Error de conexión:', error.message);
   }
-  
-  // Inicializar Firebase
+
   try {
     initializeFirebase();
   } catch (error) {
     console.error('❌ [FIREBASE] Error de inicialización:', error.message);
   }
-  
-  console.log('🕐 [CRON] Jobs programados: 15:00, 20:00, 21:00 (timezone Argentina)');
+
+  console.log('🕐 [CRON] Jobs: 15:00, 20:00, 21:00 (Dom–Vie) TZ America/Argentina/Buenos_Aires');
 });
 
-// Manejo de señales de terminación
+// Señales
 process.on('SIGTERM', () => {
   console.log('👋 [SERVER] SIGTERM recibido, cerrando servidor...');
   pool.end();
   process.exit(0);
 });
-
 process.on('SIGINT', () => {
   console.log('👋 [SERVER] SIGINT recibido, cerrando servidor...');
   pool.end();
