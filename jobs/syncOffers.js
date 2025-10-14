@@ -1,12 +1,13 @@
 // ========================================
-// SYNC OFFERS FROM ABC SOLR (optimizado)
-// Upsert por lotes + limpieza de datos
+// SYNC OFFERS FROM ABC SOLR (optimizado + vigencia)
+// Upsert por lotes + limpieza + job_runs + desactivación
 // ========================================
 
+require('dotenv').config();
 const { query } = require('../src/config/database');
 
 // ----------------------------------------
-// Helpers de limpieza (igual que tenías)
+// Helpers de limpieza (tus originales)
 // ----------------------------------------
 function cleanOfferDates(offer) {
   try {
@@ -71,13 +72,15 @@ function extractHorarios(offer) {
 }
 
 // ----------------------------------------
-// Upsert MASIVO por lotes (500)
+// Upsert MASIVO por lotes (500) + vigencia
 // Usa RETURNING (xmax=0) para contar inserts
 // ----------------------------------------
 async function bulkUpsertOffers(rows, batchSize = 500) {
   if (!rows || !rows.length) return { inserted: 0, updated: 0, processed: 0 };
 
   // columnas que enviamos como valores (sin updated_at)
+  // ⚠️ REMOVIDO 'reemplaza_nombre' (columna dropeada)
+  // ⚠️ AGREGADO 'is_active' y 'last_seen_at'
   const baseCols = [
     'id',
     'cargo',
@@ -92,10 +95,11 @@ async function bulkUpsertOffers(rows, batchSize = 500) {
     'hasta',
     'horarios',
     'domicilio',
-    'reemplaza_nombre',
     'reemplazo_motivo',
     'cierre_oferta',
-    'raw_data'
+    'raw_data',
+    'is_active',
+    'last_seen_at'
   ];
   // para el INSERT agregamos updated_at con NOW() (no como placeholder)
   const insertCols = [...baseCols, 'updated_at'];
@@ -128,10 +132,11 @@ async function bulkUpsertOffers(rows, batchSize = 500) {
             r.hasta ?? null,
             r.horarios ? JSON.stringify(r.horarios) : null,
             r.domicilio ?? null,
-            r.reemplaza_nombre ?? null,
             r.reemplazo_motivo ?? null,
             r.cierre_oferta ?? null,
-            r.raw_data ? JSON.stringify(r.raw_data) : null
+            r.raw_data ? JSON.stringify(r.raw_data) : null,
+            true,                            // is_active -> true en esta corrida
+            new Date().toISOString()         // last_seen_at -> ahora
           );
           const ph = baseCols.map((_, j) => `$${base + j + 1}`).join(', ');
           // añadimos NOW() fijo para updated_at en el INSERT
@@ -152,10 +157,11 @@ async function bulkUpsertOffers(rows, batchSize = 500) {
         hasta = EXCLUDED.hasta,
         horarios = EXCLUDED.horarios,
         domicilio = EXCLUDED.domicilio,
-        reemplaza_nombre = EXCLUDED.reemplaza_nombre,
         reemplazo_motivo = EXCLUDED.reemplazo_motivo,
         cierre_oferta = EXCLUDED.cierre_oferta,
         raw_data = EXCLUDED.raw_data,
+        is_active = TRUE,
+        last_seen_at = NOW(),
         updated_at = NOW()
       `;
 
@@ -185,12 +191,18 @@ async function bulkUpsertOffers(rows, batchSize = 500) {
 }
 
 // ----------------------------------------
-// SYNC PRINCIPAL
+// SYNC PRINCIPAL con job_runs + desactivación
 // ----------------------------------------
 async function syncOffersFromABC() {
   console.log('🔄 Iniciando sync con ABC Solr...');
-  const startTime = Date.now();
+  const wallStart = Date.now();
 
+  // 0) Abrir corrida en job_runs (para obtener started_at)
+  const open = await query(
+    "INSERT INTO job_runs(kind) VALUES('sync') RETURNING id, started_at"
+  );
+  const runId = open.rows[0].id;
+  const startedAt = open.rows[0].started_at; // usar como 'corte' para desactivar
   let cleanedDatesCount = 0;
   let cleanedCodesCount = 0;
 
@@ -218,8 +230,19 @@ async function syncOffersFromABC() {
     console.log(`📊 Ofertas obtenidas: ${offers.length}`);
 
     if (offers.length === 0) {
-      console.log('⚠️ No se encontraron ofertas publicadas');
-      return { success: true, insertadas: 0, actualizadas: 0, total: 0 };
+      // Sin ofertas: igual desactivamos las que hayan quedado activas de corridas previas
+      const deact = await query('SELECT public.deactivate_offers_before($1) AS deact', [startedAt]);
+      await query(
+        `UPDATE job_runs
+         SET finished_at = NOW(),
+             offers_seen = 0,
+             offers_activated = 0,
+             offers_deactivated = $1
+         WHERE id = $2`,
+        [deact.rows[0].deact || 0, runId]
+      );
+      console.log('⚠️ No se encontraron ofertas publicadas (se realizó desactivación si correspondía).');
+      return { success: true, insertadas: 0, actualizadas: 0, total: 0, deactivated: deact.rows[0].deact || 0 };
     }
 
     // Mapeo + limpieza (una sola pasada)
@@ -253,22 +276,44 @@ async function syncOffersFromABC() {
         hasta,
         horarios: extractHorarios(offer),
         domicilio: offer.domiciliodesempeno || offer.domicilio || null,
-        reemplaza_nombre: offer.reemp_apeynom || null,
+        // reemplaza_nombre: (REMOVIDO)
         reemplazo_motivo: offer.reemp_motivo || null,
         cierre_oferta: offer.finoferta || offer.cierre_oferta || null,
         raw_data: offer
       };
     });
 
-    // Upsert masivo
+    // Upsert masivo + activación/last_seen_at
     const res = await bulkUpsertOffers(rows, 500);
 
-    const duration = ((Date.now() - startTime) / 1000).toFixed(2);
+    // Desactivar no vistos desde el inicio de esta corrida
+    const deact = await query('SELECT public.deactivate_offers_before($1) AS deact', [startedAt]);
+
+    // Cerrar corrida con métricas
+    await query(
+      `UPDATE job_runs
+         SET finished_at = NOW(),
+             offers_seen = $1,
+             offers_activated = $2,
+             offers_deactivated = $3,
+             notes = $4
+       WHERE id = $5`,
+      [
+        offers.length,
+        res.inserted,                     // aproximación de activadas (insertadas)
+        deact.rows[0].deact || 0,
+        `cleanedDates=${cleanedDatesCount}; cleanedCodes=${cleanedCodesCount}`,
+        runId
+      ]
+    );
+
+    const duration = ((Date.now() - wallStart) / 1000).toFixed(2);
     console.log(`✅ Sync completado en ${duration}s`);
     console.log(`   📥 Insertadas: ${res.inserted}`);
     console.log(`   🔄 Actualizadas: ${res.updated}`);
     if (cleanedDatesCount > 0) console.log(`   🧹 Fechas limpiadas: ${cleanedDatesCount}`);
     if (cleanedCodesCount > 0) console.log(`   🧹 Códigos limpiados: ${cleanedCodesCount}`);
+    console.log(`   📴 Desactivadas (no vistas): ${deact.rows[0].deact || 0}`);
 
     return {
       success: true,
@@ -277,10 +322,20 @@ async function syncOffersFromABC() {
       cleanedDates: cleanedDatesCount,
       cleanedCodes: cleanedCodesCount,
       total: offers.length,
+      deactivated: deact.rows[0].deact || 0,
       duration: parseFloat(duration)
     };
   } catch (error) {
-    const duration = ((Date.now() - startTime) / 1000).toFixed(2);
+    // Cerrar corrida con error
+    await query(
+      `UPDATE job_runs
+         SET finished_at = NOW(),
+             notes = $1
+       WHERE id = $2`,
+      [`ERROR: ${error.message}`, runId]
+    );
+
+    const duration = ((Date.now() - wallStart) / 1000).toFixed(2);
     console.error(`❌ Error en sync (${duration}s):`, error.message);
     return { success: false, error: error.message, duration: parseFloat(duration) };
   }
