@@ -1,3 +1,4 @@
+// jobs/syncOffers.js
 // ========================================
 // SYNC OFFERS FROM ABC SOLR (optimizado + vigencia)
 // Upsert por lotes + limpieza + job_runs + desactivación
@@ -78,8 +79,7 @@ function extractHorarios(offer) {
 async function bulkUpsertOffers(rows, batchSize = 500) {
   if (!rows || !rows.length) return { inserted: 0, updated: 0, processed: 0 };
 
-  // columnas que enviamos como valores (sin updated_at)
-  // ⚠️ REMOVIDO 'reemplaza_nombre' (columna dropeada)
+  // ⚠️ REMOVIDO 'reemplaza_nombre'
   // ⚠️ AGREGADO 'is_active' y 'last_seen_at'
   const baseCols = [
     'id',
@@ -101,7 +101,6 @@ async function bulkUpsertOffers(rows, batchSize = 500) {
     'is_active',
     'last_seen_at'
   ];
-  // para el INSERT agregamos updated_at con NOW() (no como placeholder)
   const insertCols = [...baseCols, 'updated_at'];
 
   let inserted = 0;
@@ -139,7 +138,6 @@ async function bulkUpsertOffers(rows, batchSize = 500) {
             new Date().toISOString()         // last_seen_at -> ahora
           );
           const ph = baseCols.map((_, j) => `$${base + j + 1}`).join(', ');
-          // añadimos NOW() fijo para updated_at en el INSERT
           return `(${ph}, NOW())`;
         })
         .join(', ');
@@ -197,12 +195,13 @@ async function syncOffersFromABC() {
   console.log('🔄 Iniciando sync con ABC Solr...');
   const wallStart = Date.now();
 
-  // 0) Abrir corrida en job_runs (para obtener started_at)
+  // 0) Abrir corrida en job_runs
   const open = await query(
     "INSERT INTO job_runs(kind) VALUES('sync') RETURNING id, started_at"
   );
   const runId = open.rows[0].id;
-  const startedAt = open.rows[0].started_at; // usar como 'corte' para desactivar
+  const startedAt = open.rows[0].started_at;
+
   let cleanedDatesCount = 0;
   let cleanedCodesCount = 0;
 
@@ -230,7 +229,6 @@ async function syncOffersFromABC() {
     console.log(`📊 Ofertas obtenidas: ${offers.length}`);
 
     if (offers.length === 0) {
-      // Sin ofertas: igual desactivamos las que hayan quedado activas de corridas previas
       const deact = await query('SELECT public.deactivate_offers_before($1) AS deact', [startedAt]);
       await query(
         `UPDATE job_runs
@@ -241,26 +239,22 @@ async function syncOffersFromABC() {
          WHERE id = $2`,
         [deact.rows[0].deact || 0, runId]
       );
-      console.log('⚠️ No se encontraron ofertas publicadas (se realizó desactivación si correspondía).');
+      console.log('⚠️  Sin ofertas publicadas (se aplicó desactivación si correspondía).');
       return { success: true, insertadas: 0, actualizadas: 0, total: 0, deactivated: deact.rows[0].deact || 0 };
     }
 
-    // Mapeo + limpieza (una sola pasada)
+    // Mapeo + limpieza (una pasada)
     const rows = offers.map((offer) => {
       const { desde, hasta } = cleanOfferDates(offer);
       const { turno, revista } = cleanOfferCodes(offer);
 
-      // contadores de limpieza (solo informativos)
       if (
         (offer.supl_desde || offer.desde || offer.supl_hasta || offer.hasta) &&
-        desde === null &&
-        hasta === null
-      ) {
-        cleanedDatesCount++;
-      }
-      if ((offer.turno && !turno) || ((offer.supl_revista || offer.revista) && !revista)) {
+        desde === null && hasta === null
+      ) cleanedDatesCount++;
+
+      if ((offer.turno && !turno) || ((offer.supl_revista || offer.revista) && !revista))
         cleanedCodesCount++;
-      }
 
       return {
         id: offer.id || offer.idoferta,
@@ -276,14 +270,13 @@ async function syncOffersFromABC() {
         hasta,
         horarios: extractHorarios(offer),
         domicilio: offer.domiciliodesempeno || offer.domicilio || null,
-        // reemplaza_nombre: (REMOVIDO)
         reemplazo_motivo: offer.reemp_motivo || null,
         cierre_oferta: offer.finoferta || offer.cierre_oferta || null,
         raw_data: offer
       };
     });
 
-    // Upsert masivo + activación/last_seen_at
+    // Upsert masivo
     const res = await bulkUpsertOffers(rows, 500);
 
     // Desactivar no vistos desde el inicio de esta corrida
@@ -300,7 +293,7 @@ async function syncOffersFromABC() {
        WHERE id = $5`,
       [
         offers.length,
-        res.inserted,                     // aproximación de activadas (insertadas)
+        res.inserted,
         deact.rows[0].deact || 0,
         `cleanedDates=${cleanedDatesCount}; cleanedCodes=${cleanedCodesCount}`,
         runId
@@ -326,7 +319,6 @@ async function syncOffersFromABC() {
       duration: parseFloat(duration)
     };
   } catch (error) {
-    // Cerrar corrida con error
     await query(
       `UPDATE job_runs
          SET finished_at = NOW(),
@@ -342,3 +334,16 @@ async function syncOffersFromABC() {
 }
 
 module.exports = { syncOffersFromABC };
+
+// ===== CLI: permitir "node jobs/syncOffers.js" =====
+if (require.main === module) {
+  syncOffersFromABC()
+    .then((r) => {
+      console.log('ℹ️ Resultado:', r);
+      process.exit(r && r.success ? 0 : 1);
+    })
+    .catch((e) => {
+      console.error('❌ Sync terminó con error:', e);
+      process.exit(1);
+    });
+}
