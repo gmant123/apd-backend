@@ -1,33 +1,60 @@
 // src/config/database.js
-require('dotenv').config();
+// Conexión PG solo desde variables de entorno (sin .env, sin fallback a localhost).
+// Exports: { query, pool }
+
 const { Pool } = require('pg');
 
-/**
- * Preferimos DATABASE_URL (como da Supabase).
- * Si no está, usamos variables sueltas.
- * SSL: se habilita para Supabase/Neon o si DB_SSL='true'.
- */
-const connectionString = process.env.DATABASE_URL;
+// [change] Tomar cadena directa si existe
+const CNX = process.env.DATABASE_URL || null;
 
-const isSupabase =
-  connectionString && /supabase\.co/i.test(connectionString);
+// [change] Resolver SSL sólo si corresponde (Supabase/Neon o DB_SSL=true)
+function sslNeededFromEnvOrCnx(cnx) {
+  const looksSupabaseOrNeon = cnx && /supabase\.co|neon\.tech/i.test(cnx);
+  const forced = (process.env.DB_SSL || '').toLowerCase() === 'true';
+  return looksSupabaseOrNeon || forced ? { rejectUnauthorized: false } : undefined;
+}
 
-const sslConfig =
-  process.env.DB_SSL === 'true' || isSupabase
-    ? { rejectUnauthorized: false }
-    : undefined;
+let pool;
 
-const pool = connectionString
-  ? new Pool({ connectionString, ssl: sslConfig })
-  : new Pool({
-      host: process.env.DB_HOST || '127.0.0.1',
-      port: parseInt(process.env.DB_PORT || '5432', 10),
-      user: process.env.DB_USER || process.env.PGUSER,
-      password: process.env.DB_PASSWORD || process.env.PGPASSWORD,
-      database: process.env.DB_NAME || process.env.PGDATABASE,
-      ssl: sslConfig,
-    });
+if (CNX) {
+  // [change] Modo DATABASE_URL (preferido)
+  pool = new Pool({
+    connectionString: CNX,
+    ssl: sslNeededFromEnvOrCnx(CNX),
+  });
+  // Nota: no logeamos secretos ni valores
+  console.log('✓ DB config: DATABASE_URL');
+} else {
+  // [change] Modo DB_* (todas requeridas). Si falta alguna → error claro.
+  const cfg = {
+    host: process.env.DB_HOST,
+    port: process.env.DB_PORT ? parseInt(process.env.DB_PORT, 10) : undefined,
+    user: process.env.DB_USER || process.env.PGUSER,
+    password: process.env.DB_PASSWORD || process.env.PGPASSWORD,
+    database: process.env.DB_NAME || process.env.PGDATABASE,
+  };
 
+  const missing = Object.entries(cfg)
+    .filter(([, v]) => !v)
+    .map(([k]) => k);
+
+  if (missing.length) {
+    // [change] Falla explícita (sin intentar localhost)
+    throw new Error(
+      `No hay configuración de DB en variables de entorno. ` +
+        `Definí DATABASE_URL o DB_HOST/DB_PORT/DB_USER/DB_PASSWORD/DB_NAME. ` +
+        `Faltan: ${missing.join(', ')}`
+    );
+  }
+
+  pool = new Pool({
+    ...cfg,
+    ssl: sslNeededFromEnvOrCnx(null),
+  });
+  console.log('✓ DB config: DB_*');
+}
+
+// Manejadores de pool (sin datos sensibles)
 pool.on('error', (err) => {
   console.error('❌ Postgres pool error:', err);
   process.exit(1);
