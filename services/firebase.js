@@ -3,20 +3,43 @@ const admin = require('firebase-admin');
 
 let _appInited = false;
 
+// [change] Normalizador seguro para la private key (evita \n rotos / comillas)
+function normalizePrivateKey(pk) {
+  return String(pk)
+    .replace(/^"+|"+$/g, '') // quita comillas dobles al inicio/fin si las hay
+    .replace(/\\n/g, '\n')   // convierte secuencias \n en saltos reales
+    .replace(/\r/g, '');     // limpia \r (Windows)
+}
+
 function initializeFirebase() {
   if (_appInited && admin.apps.length) return admin.app();
 
-  // Opción A: TODO el JSON en Base64 (recomendado)
+  // Opción A: TODO el JSON en Base64 (recomendada)
   const svcB64 = process.env.FIREBASE_SERVICE_ACCOUNT_B64;
 
   if (svcB64) {
-    const json = Buffer.from(svcB64, 'base64').toString('utf8');
-    const serviceAccount = JSON.parse(json);
+    // [change] Validación robusta del B64/JSON y de campos mínimos
+    let serviceAccount;
+    try {
+      const json = Buffer.from(svcB64, 'base64').toString('utf8');
+      serviceAccount = JSON.parse(json);
+    } catch (e) {
+      throw new Error('[Firebase] FIREBASE_SERVICE_ACCOUNT_B64 inválido: no es JSON válido');
+    }
+
+    const required = ['project_id', 'client_email', 'private_key'];
+    const missing = required.filter((k) => !serviceAccount[k]);
+    if (missing.length) {
+      throw new Error(`[Firebase] JSON B64 incompleto. Faltan: ${missing.join(', ')}`);
+    }
+
+    serviceAccount.private_key = normalizePrivateKey(serviceAccount.private_key);
+
     admin.initializeApp({
       credential: admin.credential.cert(serviceAccount),
     });
     _appInited = true;
-    console.log('✅ Firebase Admin SDK inicializado (B64 JSON)');
+    console.log('✓ Firebase Admin inicializado (B64)');
     return admin.app();
   }
 
@@ -25,15 +48,20 @@ function initializeFirebase() {
   const clientEmail = process.env.FIREBASE_CLIENT_EMAIL;
   let privateKey = process.env.FIREBASE_PRIVATE_KEY;
 
-  if (!projectId || !clientEmail || !privateKey) {
-    throw new Error('Faltan variables de Firebase (usa FIREBASE_SERVICE_ACCOUNT_B64 o las 3 sueltas)');
+  // [change] Mensaje explícito listando exactamente qué falta
+  const missingVars = [];
+  if (!projectId) missingVars.push('FIREBASE_PROJECT_ID');
+  if (!clientEmail) missingVars.push('FIREBASE_CLIENT_EMAIL');
+  if (!privateKey) missingVars.push('FIREBASE_PRIVATE_KEY');
+
+  if (missingVars.length) {
+    throw new Error(
+      `[Firebase] Faltan credenciales en variables de entorno. ` +
+      `Definí FIREBASE_SERVICE_ACCOUNT_B64 o ${missingVars.join(', ')}`
+    );
   }
 
-  // Normalizar clave: quitar comillas accidentales y convertir \n en saltos reales
-  privateKey = privateKey
-    .replace(/^"+|"+$/g, '')      // quita comillas dobles al inicio/fin si las hay
-    .replace(/\\n/g, '\n')        // convierte secuencias \n en saltos reales
-    .replace(/\r/g, '');          // limpia \r por si vienen de Windows
+  privateKey = normalizePrivateKey(privateKey);
 
   admin.initializeApp({
     credential: admin.credential.cert({
@@ -43,7 +71,7 @@ function initializeFirebase() {
     }),
   });
   _appInited = true;
-  console.log('✅ Firebase Admin SDK inicializado (vars sueltas)');
+  console.log('✓ Firebase Admin inicializado (vars sueltas)');
   return admin.app();
 }
 
