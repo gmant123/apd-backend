@@ -1,43 +1,45 @@
+// src/config/database.js
+require('dotenv').config();
 const { Pool } = require('pg');
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: {
-    rejectUnauthorized: false
-  }
-});
+/**
+ * Preferimos DATABASE_URL (como da Supabase).
+ * Si no está, usamos variables sueltas.
+ * SSL: se habilita para Supabase/Neon o si DB_SSL='true'.
+ */
+const connectionString = process.env.DATABASE_URL;
 
-pool.on('connect', () => {
-  console.log('✓ Conectado a PostgreSQL');
-});
+const isSupabase =
+  connectionString && /supabase\.co/i.test(connectionString);
+
+const sslConfig =
+  process.env.DB_SSL === 'true' || isSupabase
+    ? { rejectUnauthorized: false }
+    : undefined;
+
+const pool = connectionString
+  ? new Pool({ connectionString, ssl: sslConfig })
+  : new Pool({
+      host: process.env.DB_HOST || '127.0.0.1',
+      port: parseInt(process.env.DB_PORT || '5432', 10),
+      user: process.env.DB_USER || process.env.PGUSER,
+      password: process.env.DB_PASSWORD || process.env.PGPASSWORD,
+      database: process.env.DB_NAME || process.env.PGDATABASE,
+      ssl: sslConfig,
+    });
 
 pool.on('error', (err) => {
-  console.error('Error en PostgreSQL:', err);
+  console.error('❌ Postgres pool error:', err);
+  process.exit(1);
 });
 
-const query = async (text, params) => {
+async function query(text, params) {
+  const client = await pool.connect();
   try {
-    const res = await pool.query(text, params);
-    return res;
-  } catch (error) {
-    console.error('Error en query:', error.message);
-    throw error;
+    return await client.query(text, params);
+  } finally {
+    client.release();
   }
-};
+}
 
-const testConnection = async () => {
-  try {
-    const result = await query('SELECT NOW() as now');
-    console.log('Base de datos conectada:', result.rows[0].now);
-    return true;
-  } catch (error) {
-    console.error('Error al conectar con la base de datos:', error.message);
-    return false;
-  }
-};
-
-module.exports = {
-  pool,
-  query,
-  testConnection
-};
+module.exports = { query, pool };
