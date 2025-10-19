@@ -76,11 +76,9 @@ function extractHorarios(offer) {
 // Upsert MASIVO por lotes (500) + vigencia
 // Usa RETURNING (xmax=0) para contar inserts
 // ----------------------------------------
-async function bulkUpsertOffers(rows, batchSize = 500) {
+async function bulkUpsertOffers(rows, beforeUpsertTimestamp, batchSize = 500) {
   if (!rows || !rows.length) return { inserted: 0, updated: 0, processed: 0 };
 
-  // ⚠️ REMOVIDO 'reemplaza_nombre'
-  // ⚠️ AGREGADO 'is_active' y 'last_seen_at'
   const baseCols = [
     'id',
     'cargo',
@@ -134,8 +132,8 @@ async function bulkUpsertOffers(rows, batchSize = 500) {
             r.reemplazo_motivo ?? null,
             r.cierre_oferta ?? null,
             r.raw_data ? JSON.stringify(r.raw_data) : null,
-            true,                            // is_active -> true en esta corrida
-            new Date().toISOString()         // last_seen_at -> ahora
+            true,
+            beforeUpsertTimestamp.toISOString()
           );
           const ph = baseCols.map((_, j) => `$${base + j + 1}`).join(', ');
           return `(${ph}, NOW())`;
@@ -159,7 +157,7 @@ async function bulkUpsertOffers(rows, batchSize = 500) {
         cierre_oferta = EXCLUDED.cierre_oferta,
         raw_data = EXCLUDED.raw_data,
         is_active = TRUE,
-        last_seen_at = NOW(),
+        last_seen_at = EXCLUDED.last_seen_at,
         updated_at = NOW()
       `;
 
@@ -276,11 +274,14 @@ async function syncOffersFromABC() {
       };
     });
 
-    // Upsert masivo
-    const res = await bulkUpsertOffers(rows, 500);
+    // ✅ CAPTURAR TIMESTAMP ANTES DEL UPSERT
+    const beforeUpsert = new Date();
 
-    // Desactivar no vistos desde el inicio de esta corrida
-    const deact = await query('SELECT public.deactivate_offers_before($1) AS deact', [startedAt]);
+    // Upsert masivo
+    const res = await bulkUpsertOffers(rows, beforeUpsert, 500);
+
+    // ✅ DESACTIVAR USANDO EL TIMESTAMP DE ANTES DEL UPSERT
+    const deact = await query('SELECT public.deactivate_offers_before($1) AS deact', [beforeUpsert]);
 
     // Cerrar corrida con métricas
     await query(
