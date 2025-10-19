@@ -97,6 +97,7 @@ async function bulkUpsertOffers(rows, beforeUpsertTimestamp, batchSize = 500) {
     'cierre_oferta',
     'raw_data',
     'is_active',
+    'first_seen_at',
     'last_seen_at'
   ];
   const insertCols = [...baseCols, 'updated_at'];
@@ -133,6 +134,7 @@ async function bulkUpsertOffers(rows, beforeUpsertTimestamp, batchSize = 500) {
             r.cierre_oferta ?? null,
             r.raw_data ? JSON.stringify(r.raw_data) : null,
             true,
+            beforeUpsertTimestamp.toISOString(),
             beforeUpsertTimestamp.toISOString()
           );
           const ph = baseCols.map((_, j) => `$${base + j + 1}`).join(', ');
@@ -193,7 +195,6 @@ async function syncOffersFromABC() {
   console.log('🔄 Iniciando sync con ABC Solr...');
   const wallStart = Date.now();
 
-  // 0) Abrir corrida en job_runs
   const open = await query(
     "INSERT INTO job_runs(kind) VALUES('sync') RETURNING id, started_at"
   );
@@ -241,7 +242,6 @@ async function syncOffersFromABC() {
       return { success: true, insertadas: 0, actualizadas: 0, total: 0, deactivated: deact.rows[0].deact || 0 };
     }
 
-    // Mapeo + limpieza (una pasada)
     const rows = offers.map((offer) => {
       const { desde, hasta } = cleanOfferDates(offer);
       const { turno, revista } = cleanOfferCodes(offer);
@@ -274,16 +274,10 @@ async function syncOffersFromABC() {
       };
     });
 
-    // ✅ CAPTURAR TIMESTAMP ANTES DEL UPSERT
     const beforeUpsert = new Date();
-
-    // Upsert masivo
     const res = await bulkUpsertOffers(rows, beforeUpsert, 500);
-
-    // ✅ DESACTIVAR USANDO EL TIMESTAMP DE ANTES DEL UPSERT
     const deact = await query('SELECT public.deactivate_offers_before($1) AS deact', [beforeUpsert]);
 
-    // Cerrar corrida con métricas
     await query(
       `UPDATE job_runs
          SET finished_at = NOW(),
@@ -336,7 +330,6 @@ async function syncOffersFromABC() {
 
 module.exports = { syncOffersFromABC };
 
-// ===== CLI: permitir "node jobs/syncOffers.js" =====
 if (require.main === module) {
   syncOffersFromABC()
     .then((r) => {
