@@ -23,7 +23,6 @@ if (CNX) {
     ssl: sslNeededFromEnvOrCnx(CNX),
     application_name: 'apd-sync',
   });
-  // Nota: no logeamos secretos ni valores
   console.log('✓ DB config: DATABASE_URL');
 } else {
   // [change] Modo DB_* (todas requeridas). Si falta alguna → error claro.
@@ -41,18 +40,14 @@ if (CNX) {
     .map(([k]) => k);
 
   if (missing.length) {
-    // [change] Falla explícita (sin intentar localhost)
     throw new Error(
       `No hay configuración de DB en variables de entorno. ` +
-        `Definí DATABASE_URL o DB_HOST/DB_PORT/DB_USER/DB_PASSWORD/DB_NAME. ` +
-        `Faltan: ${missing.join(', ')}`
+      `Definí DATABASE_URL o DB_HOST/DB_PORT/DB_USER/DB_PASSWORD/DB_NAME. ` +
+      `Faltan: ${missing.join(', ')}`
     );
   }
 
-  pool = new Pool({
-    ...cfg,
-    ssl: sslNeededFromEnvOrCnx(null),
-  });
+  pool = new Pool({ ...cfg, ssl: sslNeededFromEnvOrCnx(null) });
   console.log('✓ DB config: DB_*');
 }
 
