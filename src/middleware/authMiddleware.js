@@ -1,31 +1,30 @@
 const jwt = require('jsonwebtoken');
+const pool = require('../config/database');
 
-/**
- * Middleware para verificar JWT token
- * Protege rutas que requieren autenticación
- */
-const authenticateToken = (req, res, next) => {
-  // Obtener token del header Authorization
+const authenticateToken = async (req, res, next) => {
   const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1]; // "Bearer TOKEN"
-
+  const token = authHeader && authHeader.split(' ')[1];
+  
   if (!token) {
     return res.status(401).json({
       success: false,
       message: 'Token de autenticación no proporcionado'
     });
   }
-
+  
   try {
-    // Verificar y decodificar token
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     
-    // Agregar datos del usuario al request
     req.user = {
       id: decoded.id,
       dni: decoded.dni,
       gremio: decoded.gremio
     };
+    
+    await pool.query(
+      'UPDATE users SET last_login = NOW() WHERE id = $1',
+      [decoded.id]
+    );
     
     next();
   } catch (error) {
