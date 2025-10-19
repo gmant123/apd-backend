@@ -1,7 +1,7 @@
 // jobs/syncOffers.js
 // ========================================
-// SYNC OFFERS FROM ABC SOLR (optimizado + vigencia + fix encoding)
-// Upsert por lotes + limpieza + job_runs + desactivación + UTF-8 fix
+// SYNC OFFERS FROM ABC SOLR (optimizado + vigencia + guard UTF-8)
+// Upsert por lotes + limpieza + job_runs + desactivación
 // ========================================
 
 require('dotenv').config();
@@ -107,7 +107,6 @@ async function bulkUpsertOffers(rows, beforeUpsertTimestamp, batchSize = 500) {
   let processed = 0;
 
   await query('BEGIN');
-
   try {
     for (let i = 0; i < rows.length; i += batchSize) {
       const chunk = rows.slice(i, i + batchSize);
@@ -189,7 +188,7 @@ async function bulkUpsertOffers(rows, beforeUpsertTimestamp, batchSize = 500) {
 }
 
 // ----------------------------------------
-// SYNC PRINCIPAL con job_runs + desactivación + UTF-8 fix
+// SYNC PRINCIPAL con job_runs + desactivación + guard UTF-8
 // ----------------------------------------
 async function syncOffersFromABC() {
   console.log('🔄 Iniciando sync con ABC Solr...');
@@ -220,22 +219,12 @@ async function syncOffersFromABC() {
     const url = `${ABC_SOLR_URL}/select?${params}`;
     console.log('📡 Consultando ABC Solr...');
 
-    // ═══════════════════════════════════════════════════════════
-    // FIX: Forzar UTF-8 en el fetch
-    // ═══════════════════════════════════════════════════════════
-    const response = await fetch(url, {
-      headers: {
-        'Accept': 'application/json; charset=utf-8',
-        'Accept-Charset': 'utf-8'
-      }
-    });
-
+    // Decodificación segura en UTF-8 (modo fatal) para no “crear” U+FFFD
+    const response = await fetch(url, { headers: { 'Accept': 'application/json' } });
     if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-
-    // Leer como texto primero para forzar UTF-8
-    const textData = await response.text();
-    const data = JSON.parse(textData);
-    // ═══════════════════════════════════════════════════════════
+    const ab = await response.arrayBuffer();
+    const text = new TextDecoder('utf-8', { fatal: true }).decode(ab);
+    const data = JSON.parse(text);
 
     const offers = data.response?.docs || [];
     console.log(`📊 Ofertas obtenidas: ${offers.length}`);
@@ -255,6 +244,17 @@ async function syncOffersFromABC() {
       return { success: true, insertadas: 0, actualizadas: 0, total: 0, deactivated: deact.rows[0].deact || 0 };
     }
 
+    // Guardia anti-U+FFFD (replacement char)
+    const BAD = /\uFFFD/;
+    const normalizeNFC = (s) => (typeof s === 'string' ? s.normalize('NFC') : s);
+    const assertNoReplacementChars = (rec, id) => {
+      for (const [k, v] of Object.entries(rec)) {
+        if (typeof v === 'string' && BAD.test(v)) {
+          throw new Error(`U+FFFD en campo "${k}" (offer ${id}): "${v}"`);
+        }
+      }
+    };
+
     const rows = offers.map((offer) => {
       const { desde, hasta } = cleanOfferDates(offer);
       const { turno, revista } = cleanOfferCodes(offer);
@@ -267,7 +267,7 @@ async function syncOffersFromABC() {
       if ((offer.turno && !turno) || ((offer.supl_revista || offer.revista) && !revista))
         cleanedCodesCount++;
 
-      return {
+      const row = {
         id: offer.id || offer.idoferta,
         cargo: offer.cargo || offer.descripcioncargo,
         distrito: offer.descdistrito ? offer.descdistrito.toLowerCase() : null,
@@ -285,6 +285,14 @@ async function syncOffersFromABC() {
         cierre_oferta: offer.finoferta || offer.cierre_oferta || null,
         raw_data: offer
       };
+
+      // Normalización Unicode y guardia
+      for (const k of ['cargo','distrito','modalidad','escuela','curso_division','domicilio','reemplazo_motivo']) {
+        row[k] = normalizeNFC(row[k]);
+      }
+      assertNoReplacementChars(row, row.id);
+
+      return row;
     });
 
     const beforeUpsert = new Date();
