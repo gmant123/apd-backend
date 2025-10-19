@@ -1,4 +1,3 @@
-// jobs/scheduler.js
 const cron = require('node-cron');
 const { syncOffersFromABC } = require('./syncOffers');
 const { sendDailyNotifications } = require('./notifications');
@@ -7,74 +6,137 @@ const { initializeFirebase } = require('../services/firebase');
 const TZ = 'America/Argentina/Buenos_Aires';
 const SEP = '─'.repeat(60);
 
-/**
- * Horarios (AR, Dom→Vie; se excluye sábado = 6):
- * - 12:05 Sync
- * - 17:05 Sync
- * - 20:45 Sync (corte del día)
- * - 21:00 Notificaciones (leyenda “hasta 20:45”)
- */
 function startCronJobs() {
   console.log('⏰ Iniciando cron jobs...\n');
 
-  // Inicializar Firebase (necesario para notificaciones)
   try {
     initializeFirebase();
   } catch (error) {
     console.error('⚠️  Firebase no se pudo inicializar (las notificaciones NO funcionarán)\n');
   }
 
-  // 12:05 — Primer sync del día (Dom-Vie)
-  cron.schedule('5 12 * * 0-5', async () => {
-    console.log(`\n🔔 [CRON 12:05] Sync ofertas (primer barrido)\n${SEP}`);
+  cron.schedule('0 5 * * 0-5', async () => {
+    console.log(`\n🔔 [CRON 05:00] Sync ofertas (madrugadores)\n${SEP}`);
     try {
       const result = await syncOffersFromABC();
       if (result.success) {
-        console.log('✅ Sync 12:05 OK');
+        console.log('✅ Sync 05:00 OK');
       } else {
-        console.error('❌ Sync 12:05 falló:', result.error);
+        console.error('❌ Sync 05:00 falló:', result.error);
       }
     } catch (error) {
-      console.error('❌ Error crítico en sync 12:05:', error.message);
+      console.error('❌ Error crítico en sync 05:00:', error.message);
     }
     console.log(`${SEP}\n`);
   }, { timezone: TZ });
 
-  // 17:05 — Segundo sync (Dom-Vie)
-  cron.schedule('5 17 * * 0-5', async () => {
-    console.log(`\n🔔 [CRON 17:05] Sync ofertas (actualización tarde)\n${SEP}`);
+  cron.schedule('0 12 * * 0-5', async () => {
+    console.log(`\n🔔 [CRON 12:00] Sync ofertas (post turno mañana)\n${SEP}`);
     try {
       const result = await syncOffersFromABC();
       if (result.success) {
-        console.log('✅ Sync 17:05 OK');
+        console.log('✅ Sync 12:00 OK');
       } else {
-        console.error('❌ Sync 17:05 falló:', result.error);
+        console.error('❌ Sync 12:00 falló:', result.error);
       }
     } catch (error) {
-      console.error('❌ Error crítico en sync 17:05:', error.message);
+      console.error('❌ Error crítico en sync 12:00:', error.message);
     }
     console.log(`${SEP}\n`);
   }, { timezone: TZ });
 
-  // 20:45 — Tercer sync y corte del día (Dom-Vie)
-  cron.schedule('45 20 * * 0-5', async () => {
-    console.log(`\n🔔 [CRON 20:45] Sync ofertas (corte del día)\n${SEP}`);
+  cron.schedule('0 14 * * 0-5', async () => {
+    console.log(`\n🔔 [CRON 14:00] Sync ofertas (inicio actividad tarde)\n${SEP}`);
     try {
       const result = await syncOffersFromABC();
       if (result.success) {
-        console.log('✅ Sync 20:45 OK (corte aplicado)');
+        console.log('✅ Sync 14:00 OK');
       } else {
-        console.error('❌ Sync 20:45 falló:', result.error);
+        console.error('❌ Sync 14:00 falló:', result.error);
       }
     } catch (error) {
-      console.error('❌ Error crítico en sync 20:45:', error.message);
+      console.error('❌ Error crítico en sync 14:00:', error.message);
     }
     console.log(`${SEP}\n`);
   }, { timezone: TZ });
 
-  // 21:00 — Notificaciones diarias (Dom-Vie)
+  cron.schedule('0 15 * * 0-5', async () => {
+    console.log(`\n🔔 [CRON 15:00] Sync ofertas (pico 25%)\n${SEP}`);
+    try {
+      const result = await syncOffersFromABC();
+      if (result.success) {
+        console.log('✅ Sync 15:00 OK');
+      } else {
+        console.error('❌ Sync 15:00 falló:', result.error);
+      }
+    } catch (error) {
+      console.error('❌ Error crítico en sync 15:00:', error.message);
+    }
+    console.log(`${SEP}\n`);
+  }, { timezone: TZ });
+
+  cron.schedule('0 16 * * 0-5', async () => {
+    console.log(`\n🔔 [CRON 16:00] Sync ofertas (pico máximo 46%)\n${SEP}`);
+    try {
+      const result = await syncOffersFromABC();
+      if (result.success) {
+        console.log('✅ Sync 16:00 OK');
+      } else {
+        console.error('❌ Sync 16:00 falló:', result.error);
+      }
+    } catch (error) {
+      console.error('❌ Error crítico en sync 16:00:', error.message);
+    }
+    console.log(`${SEP}\n`);
+  }, { timezone: TZ });
+
+  cron.schedule('0 17 * * 0-5', async () => {
+    console.log(`\n🔔 [CRON 17:00] Sync ofertas (cierre turno tarde)\n${SEP}`);
+    try {
+      const result = await syncOffersFromABC();
+      if (result.success) {
+        console.log('✅ Sync 17:00 OK');
+      } else {
+        console.error('❌ Sync 17:00 falló:', result.error);
+      }
+    } catch (error) {
+      console.error('❌ Error crítico en sync 17:00:', error.message);
+    }
+    console.log(`${SEP}\n`);
+  }, { timezone: TZ });
+
+  cron.schedule('0 20 * * 0-5', async () => {
+    console.log(`\n🔔 [CRON 20:00] Sync ofertas (pico noche 26%)\n${SEP}`);
+    try {
+      const result = await syncOffersFromABC();
+      if (result.success) {
+        console.log('✅ Sync 20:00 OK');
+      } else {
+        console.error('❌ Sync 20:00 falló:', result.error);
+      }
+    } catch (error) {
+      console.error('❌ Error crítico en sync 20:00:', error.message);
+    }
+    console.log(`${SEP}\n`);
+  }, { timezone: TZ });
+
+  cron.schedule('55 20 * * 0-5', async () => {
+    console.log(`\n🔔 [CRON 20:55] Sync ofertas (pre-push)\n${SEP}`);
+    try {
+      const result = await syncOffersFromABC();
+      if (result.success) {
+        console.log('✅ Sync 20:55 OK (último del día)');
+      } else {
+        console.error('❌ Sync 20:55 falló:', result.error);
+      }
+    } catch (error) {
+      console.error('❌ Error crítico en sync 20:55:', error.message);
+    }
+    console.log(`${SEP}\n`);
+  }, { timezone: TZ });
+
   cron.schedule('0 21 * * 0-5', async () => {
-    console.log(`\n🔔 [CRON 21:00] Notificaciones diarias (corte 20:45)\n${SEP}`);
+    console.log(`\n🔔 [CRON 21:00] Notificaciones diarias\n${SEP}`);
     try {
       const result = await sendDailyNotifications();
       if (result && result.success) {
@@ -90,11 +152,32 @@ function startCronJobs() {
     console.log(`${SEP}\n`);
   }, { timezone: TZ });
 
+  cron.schedule('0 23 * * 0-5', async () => {
+    console.log(`\n🔔 [CRON 23:00] Sync ofertas (tardías 3%)\n${SEP}`);
+    try {
+      const result = await syncOffersFromABC();
+      if (result.success) {
+        console.log('✅ Sync 23:00 OK');
+      } else {
+        console.error('❌ Sync 23:00 falló:', result.error);
+      }
+    } catch (error) {
+      console.error('❌ Error crítico en sync 23:00:', error.message);
+    }
+    console.log(`${SEP}\n`);
+  }, { timezone: TZ });
+
   console.log('✅ Cron jobs configurados:\n');
-  console.log('   📅 12:05 (AR) Dom–Vie: Sync');
-  console.log('   📅 17:05 (AR) Dom–Vie: Sync');
-  console.log('   📅 20:45 (AR) Dom–Vie: Sync (corte del día)');
-  console.log('   📅 21:00 (AR) Dom–Vie: Notificaciones (leyenda “hasta 20:45”)');
+  console.log('   📅 05:00 (AR) Dom–Vie: Sync (madrugadores)');
+  console.log('   📅 12:00 (AR) Dom–Vie: Sync (post turno mañana)');
+  console.log('   📅 14:00 (AR) Dom–Vie: Sync (inicio tarde)');
+  console.log('   📅 15:00 (AR) Dom–Vie: Sync (pico 25%)');
+  console.log('   📅 16:00 (AR) Dom–Vie: Sync (pico máximo 46%)');
+  console.log('   📅 17:00 (AR) Dom–Vie: Sync (cierre tarde)');
+  console.log('   📅 20:00 (AR) Dom–Vie: Sync (pico noche 26%)');
+  console.log('   📅 20:55 (AR) Dom–Vie: Sync (pre-push)');
+  console.log('   📅 21:00 (AR) Dom–Vie: Push notifications');
+  console.log('   📅 23:00 (AR) Dom–Vie: Sync (tardías 3%)');
   console.log(`   🌍 Timezone: ${TZ}\n${SEP}\n`);
 }
 
