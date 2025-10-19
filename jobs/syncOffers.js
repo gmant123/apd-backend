@@ -1,7 +1,11 @@
 // jobs/syncOffers.js
 // ========================================
-// SYNC OFFERS FROM ABC SOLR (UTF-8 fatal + fallback Latin-1 estricto)
-// Upsert por lotes + vigencia + job_runs + desactivación + guard anti-U+FFFD
+// SYNC OFFERS FROM ABC SOLR
+// - Decodificación robusta: UTF-8 (fatal) -> fallback Latin-1 SOLO si el cuerpo parece JSON
+// - Upsert por lotes
+// - job_runs + desactivación por vigencia
+// - Normalización NFC + guard anti-U+FFFD antes de grabar
+// Requiere Node 18+ (fetch global)
 // ========================================
 
 require('dotenv').config();
@@ -9,7 +13,7 @@ const { TextDecoder } = require('util');
 const { query } = require('../src/config/database');
 
 // ----------------------------------------
-// Helpers de limpieza (tus originales)
+// Helpers de limpieza
 // ----------------------------------------
 function cleanOfferDates(offer) {
   try {
@@ -61,12 +65,15 @@ function cleanOfferCodes(offer) {
 function extractHorarios(offer) {
   const dias = ['lunes', 'martes', 'miercoles', 'jueves', 'viernes', 'sabado'];
   const horarios = [];
-  for (const dia of dias) {
+  dias.forEach((dia) => {
     const horario = offer[dia];
     if (horario && String(horario).trim() !== '') {
-      horarios.push({ dia: dia.charAt(0).toUpperCase() + dia.slice(1), hora: String(horario).trim() });
+      horarios.push({
+        dia: dia.charAt(0).toUpperCase() + dia.slice(1),
+        hora: String(horario).trim(),
+      });
     }
-  }
+  });
   return horarios;
 }
 
@@ -78,46 +85,67 @@ async function bulkUpsertOffers(rows, beforeUpsertTimestamp, batchSize = 500) {
   if (!rows || !rows.length) return { inserted: 0, updated: 0, processed: 0 };
 
   const baseCols = [
-    'id','cargo','distrito','modalidad','escuela','curso_division','turno','revista','horas_modulos',
-    'desde','hasta','horarios','domicilio','reemplazo_motivo','cierre_oferta','raw_data',
-    'is_active','first_seen_at','last_seen_at'
+    'id',
+    'cargo',
+    'distrito',
+    'modalidad',
+    'escuela',
+    'curso_division',
+    'turno',
+    'revista',
+    'horas_modulos',
+    'desde',
+    'hasta',
+    'horarios',
+    'domicilio',
+    'reemplazo_motivo',
+    'cierre_oferta',
+    'raw_data',
+    'is_active',
+    'first_seen_at',
+    'last_seen_at'
   ];
   const insertCols = [...baseCols, 'updated_at'];
 
-  let inserted = 0, updated = 0, processed = 0;
+  let inserted = 0;
+  let updated = 0;
+  let processed = 0;
 
   await query('BEGIN');
+
   try {
     for (let i = 0; i < rows.length; i += batchSize) {
       const chunk = rows.slice(i, i + batchSize);
       const values = [];
 
-      const placeholders = chunk.map((r, idx) => {
-        const base = idx * baseCols.length;
-        values.push(
-          r.id,
-          r.cargo ?? null,
-          r.distrito ?? null,
-          r.modalidad ?? null,
-          r.escuela ?? null,
-          r.curso_division ?? null,
-          r.turno ?? null,
-          r.revista ?? null,
-          r.horas_modulos ?? null,
-          r.desde ?? null,
-          r.hasta ?? null,
-          r.horarios ? JSON.stringify(r.horarios) : null,
-          r.domicilio ?? null,
-          r.reemplazo_motivo ?? null,
-          r.cierre_oferta ?? null,
-          r.raw_data ? JSON.stringify(r.raw_data) : null,
-          true,
-          beforeUpsertTimestamp.toISOString(),
-          beforeUpsertTimestamp.toISOString()
-        );
-        const ph = baseCols.map((_, j) => `$${base + j + 1}`).join(', ');
-        return `(${ph}, NOW())`;
-      }).join(', ');
+      const placeholders = chunk
+        .map((r, idx) => {
+          const base = idx * baseCols.length;
+          values.push(
+            r.id,
+            r.cargo ?? null,
+            r.distrito ?? null,
+            r.modalidad ?? null,
+            r.escuela ?? null,
+            r.curso_division ?? null,
+            r.turno ?? null,
+            r.revista ?? null,
+            r.horas_modulos ?? null,
+            r.desde ?? null,
+            r.hasta ?? null,
+            r.horarios ? JSON.stringify(r.horarios) : null,
+            r.domicilio ?? null,
+            r.reemplazo_motivo ?? null,
+            r.cierre_oferta ?? null,
+            r.raw_data ? JSON.stringify(r.raw_data) : null,
+            true,
+            beforeUpsertTimestamp.toISOString(),
+            beforeUpsertTimestamp.toISOString()
+          );
+          const ph = baseCols.map((_, j) => `$${base + j + 1}`).join(', ');
+          return `(${ph}, NOW())`;
+        })
+        .join(', ');
 
       const updates = `
         cargo = EXCLUDED.cargo,
@@ -143,12 +171,13 @@ async function bulkUpsertOffers(rows, beforeUpsertTimestamp, batchSize = 500) {
       const sql = `
         INSERT INTO offers (${insertCols.join(',')})
         VALUES ${placeholders}
-        ON CONFLICT (id) DO UPDATE SET ${updates}
+        ON CONFLICT (id) DO UPDATE SET
+          ${updates}
         RETURNING (xmax = 0) AS inserted
       `;
 
       const res = await query(sql, values);
-      res.rows.forEach(r => (r.inserted ? inserted++ : updated++));
+      res.rows.forEach((r) => (r.inserted ? inserted++ : updated++));
       processed += chunk.length;
 
       if ((i + chunk.length) % 500 === 0 || i + chunk.length >= rows.length) {
@@ -174,30 +203,6 @@ function looksLikeJSON(u8) {
   return b === 0x7b /* { */ || b === 0x5b /* [ */;
 }
 
-async function fetchSolrJSON(url) {
-  const res = await fetch(url, { headers: { 'Accept': 'application/json' } });
-  if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
-
-  const ab = await res.arrayBuffer();
-  const u8 = new Uint8Array(ab);
-
-  // 1) Intento UTF-8 estricto
-  try {
-    const text = new TextDecoder('utf-8', { fatal: true }).decode(u8);
-    if (!looksLikeJSON(u8) || (text[0] !== '{' && text[0] !== '[')) {
-      throw new Error('Respuesta no-JSON');
-    }
-    return { data: JSON.parse(text), encodingUsed: 'utf-8' };
-  } catch (e) {
-    // 2) Fallback sólo si “parece JSON” (no HTML/WAF)
-    if (!looksLikeJSON(u8)) {
-      throw new Error(`Respuesta no-JSON: ${e.message || e}`);
-    }
-    const textL1 = new TextDecoder('latin1').decode(u8);
-    return { data: JSON.parse(textL1), encodingUsed: 'latin-1' };
-  }
-}
-
 // ----------------------------------------
 // SYNC PRINCIPAL con job_runs + desactivación + guard anti-U+FFFD
 // ----------------------------------------
@@ -205,7 +210,9 @@ async function syncOffersFromABC() {
   console.log('🔄 Iniciando sync con ABC Solr...');
   const wallStart = Date.now();
 
-  const open = await query("INSERT INTO job_runs(kind) VALUES('sync') RETURNING id, started_at");
+  const open = await query(
+    "INSERT INTO job_runs(kind) VALUES('sync') RETURNING id, started_at"
+  );
   const runId = open.rows[0].id;
   const startedAt = open.rows[0].started_at;
 
@@ -218,32 +225,52 @@ async function syncOffersFromABC() {
       process.env.ABC_SOLR_URL ||
       'https://servicios3.abc.gob.ar/valoracion.docente/api/apd.oferta.encabezado';
 
-    const params = new URLSearchParams({
-      q: '*:*',
-      fq: 'estado:publicada',
-      rows: 5000,
-      wt: 'json',
-      sort: 'finoferta desc'
-    });
+    const onlyId = process.env.ONLY_ID || null; // opcional para probar un caso puntual
+
+    const params = new URLSearchParams(
+      onlyId
+        ? { q: `id:${onlyId}`, rows: '1', wt: 'json' }
+        : { q: '*:*', fq: 'estado:publicada', rows: '5000', wt: 'json', sort: 'finoferta desc' }
+    );
 
     const url = `${ABC_SOLR_URL}/select?${params}`;
-    console.log('📡 Consultando ABC Solr...');
+    console.log('📡 Consultando ABC Solr...', onlyId ? `(ONLY_ID=${onlyId})` : '');
 
-    const { data, encodingUsed: enc } = await fetchSolrJSON(url);
-    encodingUsed = enc;
+    const res = await fetch(url, { headers: { Accept: 'application/json' } });
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+
+    const ab = await res.arrayBuffer();
+    const u8 = new Uint8Array(ab);
+
+    const looksJSON = looksLikeJSON(u8);
+
+    let text;
+    try {
+      text = new TextDecoder('utf-8', { fatal: true }).decode(u8);
+      if (!looksJSON || (text[0] !== '{' && text[0] !== '[')) {
+        throw new Error('Respuesta no-JSON');
+      }
+    } catch (e) {
+      if (!looksJSON) throw new Error(`Respuesta no-JSON: ${e.message || e}`);
+      text = new TextDecoder('latin1').decode(u8);
+      encodingUsed = 'latin-1';
+    }
+
+    const data = JSON.parse(text);
+    console.log(`🔤 Encoding usado: ${encodingUsed}`);
 
     const offers = data.response?.docs || [];
-    console.log(`📊 Ofertas obtenidas: ${offers.length} (encoding=${encodingUsed})`);
+    console.log(`📊 Ofertas obtenidas: ${offers.length}`);
 
     if (offers.length === 0) {
       const deact = await query('SELECT public.deactivate_offers_before($1) AS deact', [startedAt]);
       await query(
         `UPDATE job_runs
-           SET finished_at = NOW(),
-               offers_seen = 0,
-               offers_activated = 0,
-               offers_deactivated = $1,
-               notes = $2
+         SET finished_at = NOW(),
+             offers_seen = 0,
+             offers_activated = 0,
+             offers_deactivated = $1,
+             notes = $2
          WHERE id = $3`,
         [deact.rows[0].deact || 0, `encoding=${encodingUsed}`, runId]
       );
@@ -251,14 +278,26 @@ async function syncOffersFromABC() {
       return { success: true, insertadas: 0, actualizadas: 0, total: 0, deactivated: deact.rows[0].deact || 0 };
     }
 
+    // Guardia anti-U+FFFD y normalización
     const BAD = /\uFFFD/;
     const normalizeNFC = (s) => (typeof s === 'string' ? s.normalize('NFC') : s);
+    const assertNoReplacementChars = (rec, id) => {
+      for (const [k, v] of Object.entries(rec)) {
+        if (typeof v === 'string' && BAD.test(v)) {
+          throw new Error(`U+FFFD en campo "${k}" (offer ${id}): "${v}"`);
+        }
+      }
+    };
+
     const rows = offers.map((offer) => {
       const { desde, hasta } = cleanOfferDates(offer);
       const { turno, revista } = cleanOfferCodes(offer);
 
-      if ((offer.supl_desde || offer.desde || offer.supl_hasta || offer.hasta) && desde === null && hasta === null)
-        cleanedDatesCount++;
+      if (
+        (offer.supl_desde || offer.desde || offer.supl_hasta || offer.hasta) &&
+        desde === null && hasta === null
+      ) cleanedDatesCount++;
+
       if ((offer.turno && !turno) || ((offer.supl_revista || offer.revista) && !revista))
         cleanedCodesCount++;
 
@@ -281,17 +320,17 @@ async function syncOffersFromABC() {
         raw_data: offer
       };
 
+      // Normalización Unicode y guardia
       for (const k of ['cargo','distrito','modalidad','escuela','curso_division','domicilio','reemplazo_motivo']) {
         row[k] = normalizeNFC(row[k]);
-        if (typeof row[k] === 'string' && BAD.test(row[k])) {
-          throw new Error(`U+FFFD en campo "${k}" (offer ${row.id}): "${row[k]}"`);
-        }
       }
+      assertNoReplacementChars(row, row.id);
+
       return row;
     });
 
     const beforeUpsert = new Date();
-    const res = await bulkUpsertOffers(rows, beforeUpsert, 500);
+    const resUp = await bulkUpsertOffers(rows, beforeUpsert, 500);
     const deact = await query('SELECT public.deactivate_offers_before($1) AS deact', [beforeUpsert]);
 
     await query(
@@ -304,7 +343,7 @@ async function syncOffersFromABC() {
        WHERE id = $5`,
       [
         offers.length,
-        res.inserted,
+        resUp.inserted,
         deact.rows[0].deact || 0,
         `encoding=${encodingUsed}; cleanedDates=${cleanedDatesCount}; cleanedCodes=${cleanedCodesCount}`,
         runId
@@ -313,17 +352,16 @@ async function syncOffersFromABC() {
 
     const duration = ((Date.now() - wallStart) / 1000).toFixed(2);
     console.log(`✅ Sync completado en ${duration}s`);
-    console.log(`   📥 Insertadas: ${res.inserted}`);
-    console.log(`   🔄 Actualizadas: ${res.updated}`);
+    console.log(`   📥 Insertadas: ${resUp.inserted}`);
+    console.log(`   🔄 Actualizadas: ${resUp.updated}`);
     if (cleanedDatesCount > 0) console.log(`   🧹 Fechas limpiadas: ${cleanedDatesCount}`);
     if (cleanedCodesCount > 0) console.log(`   🧹 Códigos limpiados: ${cleanedCodesCount}`);
-    console.log(`   🔤 Encoding usado: ${encodingUsed}`);
     console.log(`   📴 Desactivadas (no vistas): ${deact.rows[0].deact || 0}`);
 
     return {
       success: true,
-      insertadas: res.inserted,
-      actualizadas: res.updated,
+      insertadas: resUp.inserted,
+      actualizadas: resUp.updated,
       cleanedDates: cleanedDatesCount,
       cleanedCodes: cleanedCodesCount,
       total: offers.length,
@@ -339,6 +377,7 @@ async function syncOffersFromABC() {
        WHERE id = $2`,
       [`ERROR: ${error.message}; encoding=${encodingUsed}`, runId]
     );
+
     const duration = ((Date.now() - wallStart) / 1000).toFixed(2);
     console.error(`❌ Error en sync (${duration}s):`, error.message);
     return { success: false, error: error.message, duration: parseFloat(duration) };
