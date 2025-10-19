@@ -1,14 +1,65 @@
 // jobs/syncOffers.js
 // ========================================
-// SYNC OFFERS FROM ABC SOLR (optimizado + vigencia)
-// Upsert por lotes + limpieza + job_runs + desactivación
+// SYNC OFFERS FROM ABC SOLR (optimizado + vigencia + fix encoding)
+// Upsert por lotes + limpieza + job_runs + desactivación + Latin-1 fix
 // ========================================
 
 require('dotenv').config();
 const { query } = require('../src/config/database');
 
 // ----------------------------------------
-// Helpers de limpieza (tus originales)
+// FIX: Decodificar Latin-1 a UTF-8
+// ----------------------------------------
+function fixLatin1Encoding(text) {
+  if (!text || typeof text !== 'string') return text;
+  
+  try {
+    // Detectar si tiene caracteres mal codificados (� o códigos raros)
+    if (!/[\u0080-\u00FF]/.test(text) && !text.includes('�')) {
+      return text; // Ya está bien
+    }
+    
+    // Convertir de Latin-1 mal interpretado a UTF-8 correcto
+    const bytes = new Uint8Array(text.split('').map(c => c.charCodeAt(0)));
+    const decoder = new TextDecoder('iso-8859-1');
+    return decoder.decode(bytes);
+  } catch {
+    return text; // Si falla, devolver original
+  }
+}
+
+// ----------------------------------------
+// Aplicar fix a todos los campos de texto
+// ----------------------------------------
+function fixOfferEncoding(offer) {
+  const textFields = [
+    'cargo',
+    'descripcioncargo',
+    'descdistrito',
+    'descnivelmodalidad',
+    'escuela',
+    'codestablecimiento',
+    'cursodivision',
+    'curso_division',
+    'domiciliodesempeno',
+    'domicilio',
+    'reemp_motivo',
+    'reemplaza_nombre'
+  ];
+  
+  const fixed = { ...offer };
+  
+  textFields.forEach(field => {
+    if (fixed[field]) {
+      fixed[field] = fixLatin1Encoding(fixed[field]);
+    }
+  });
+  
+  return fixed;
+}
+
+// ----------------------------------------
+// Helpers de limpieza (originales)
 // ----------------------------------------
 function cleanOfferDates(offer) {
   try {
@@ -189,7 +240,7 @@ async function bulkUpsertOffers(rows, beforeUpsertTimestamp, batchSize = 500) {
 }
 
 // ----------------------------------------
-// SYNC PRINCIPAL con job_runs + desactivación
+// SYNC PRINCIPAL con job_runs + desactivación + encoding fix
 // ----------------------------------------
 async function syncOffersFromABC() {
   console.log('🔄 Iniciando sync con ABC Solr...');
@@ -203,6 +254,7 @@ async function syncOffersFromABC() {
 
   let cleanedDatesCount = 0;
   let cleanedCodesCount = 0;
+  let fixedEncodingCount = 0;
 
   try {
     const ABC_SOLR_URL =
@@ -243,34 +295,44 @@ async function syncOffersFromABC() {
     }
 
     const rows = offers.map((offer) => {
-      const { desde, hasta } = cleanOfferDates(offer);
-      const { turno, revista } = cleanOfferCodes(offer);
+      // ═══════════════════════════════════════════════════════════
+      // FIX ENCODING PRIMERO (antes de cualquier procesamiento)
+      // ═══════════════════════════════════════════════════════════
+      const fixedOffer = fixOfferEncoding(offer);
+      
+      // Contar si se aplicó fix
+      if (fixedOffer.cargo !== offer.cargo || fixedOffer.distrito !== offer.distrito) {
+        fixedEncodingCount++;
+      }
+
+      const { desde, hasta } = cleanOfferDates(fixedOffer);
+      const { turno, revista } = cleanOfferCodes(fixedOffer);
 
       if (
-        (offer.supl_desde || offer.desde || offer.supl_hasta || offer.hasta) &&
+        (fixedOffer.supl_desde || fixedOffer.desde || fixedOffer.supl_hasta || fixedOffer.hasta) &&
         desde === null && hasta === null
       ) cleanedDatesCount++;
 
-      if ((offer.turno && !turno) || ((offer.supl_revista || offer.revista) && !revista))
+      if ((fixedOffer.turno && !turno) || ((fixedOffer.supl_revista || fixedOffer.revista) && !revista))
         cleanedCodesCount++;
 
       return {
-        id: offer.id || offer.idoferta,
-        cargo: offer.cargo || offer.descripcioncargo,
-        distrito: offer.descdistrito ? offer.descdistrito.toLowerCase() : null,
-        modalidad: offer.descnivelmodalidad ? offer.descnivelmodalidad.toLowerCase() : null,
-        escuela: offer.escuela || offer.codestablecimiento,
-        curso_division: offer.cursodivision || offer.curso_division || null,
+        id: fixedOffer.id || fixedOffer.idoferta,
+        cargo: fixedOffer.cargo || fixedOffer.descripcioncargo,
+        distrito: fixedOffer.descdistrito ? fixedOffer.descdistrito.toLowerCase() : null,
+        modalidad: fixedOffer.descnivelmodalidad ? fixedOffer.descnivelmodalidad.toLowerCase() : null,
+        escuela: fixedOffer.escuela || fixedOffer.codestablecimiento,
+        curso_division: fixedOffer.cursodivision || fixedOffer.curso_division || null,
         turno,
         revista,
-        horas_modulos: offer.hsmodulos || offer.horas_modulos || null,
+        horas_modulos: fixedOffer.hsmodulos || fixedOffer.horas_modulos || null,
         desde,
         hasta,
-        horarios: extractHorarios(offer),
-        domicilio: offer.domiciliodesempeno || offer.domicilio || null,
-        reemplazo_motivo: offer.reemp_motivo || null,
-        cierre_oferta: offer.finoferta || offer.cierre_oferta || null,
-        raw_data: offer
+        horarios: extractHorarios(fixedOffer),
+        domicilio: fixedOffer.domiciliodesempeno || fixedOffer.domicilio || null,
+        reemplazo_motivo: fixedOffer.reemp_motivo || null,
+        cierre_oferta: fixedOffer.finoferta || fixedOffer.cierre_oferta || null,
+        raw_data: fixedOffer // Guardar versión corregida
       };
     });
 
@@ -290,7 +352,7 @@ async function syncOffersFromABC() {
         offers.length,
         res.inserted,
         deact.rows[0].deact || 0,
-        `cleanedDates=${cleanedDatesCount}; cleanedCodes=${cleanedCodesCount}`,
+        `cleanedDates=${cleanedDatesCount}; cleanedCodes=${cleanedCodesCount}; fixedEncoding=${fixedEncodingCount}`,
         runId
       ]
     );
@@ -301,6 +363,7 @@ async function syncOffersFromABC() {
     console.log(`   🔄 Actualizadas: ${res.updated}`);
     if (cleanedDatesCount > 0) console.log(`   🧹 Fechas limpiadas: ${cleanedDatesCount}`);
     if (cleanedCodesCount > 0) console.log(`   🧹 Códigos limpiados: ${cleanedCodesCount}`);
+    if (fixedEncodingCount > 0) console.log(`   🔤 Encoding corregido: ${fixedEncodingCount}`);
     console.log(`   📴 Desactivadas (no vistas): ${deact.rows[0].deact || 0}`);
 
     return {
@@ -309,6 +372,7 @@ async function syncOffersFromABC() {
       actualizadas: res.updated,
       cleanedDates: cleanedDatesCount,
       cleanedCodes: cleanedCodesCount,
+      fixedEncoding: fixedEncodingCount,
       total: offers.length,
       deactivated: deact.rows[0].deact || 0,
       duration: parseFloat(duration)
