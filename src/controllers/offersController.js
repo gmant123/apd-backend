@@ -58,6 +58,7 @@ const getUnreadOffers = async (req, res) => {
        JOIN user_offers uo ON o.id = uo.offer_id
        WHERE uo.user_id = $1 
        AND uo.is_new = true
+       AND o.is_active = true
        ORDER BY o.created_at DESC`,
       [userId]
     );
@@ -122,7 +123,10 @@ const getAllOffers = async (req, res) => {
       });
     }
 
-    let whereConditions = [];
+    // ═══════════════════════════════════════════════════════════
+    // FIX: Agregar o.is_active = true como condición BASE
+    // ═══════════════════════════════════════════════════════════
+    let whereConditions = ['o.is_active = true'];
     let params = [userId];
     let paramIndex = 2;
 
@@ -160,9 +164,8 @@ const getAllOffers = async (req, res) => {
       }
     }
 
-    const whereClause = whereConditions.length > 0 
-      ? `WHERE ${whereConditions.join(' AND ')}`
-      : '';
+    // whereConditions SIEMPRE tiene al menos 1 elemento (is_active)
+    const whereClause = `WHERE ${whereConditions.join(' AND ')}`;
 
     const queryText = `
       SELECT o.*, uo.is_new, uo.is_favorite, uo.viewed_at
@@ -211,7 +214,9 @@ const getFavorites = async (req, res) => {
       `SELECT o.*, uo.is_new, uo.is_favorite, uo.viewed_at
        FROM offers o
        JOIN user_offers uo ON o.id = uo.offer_id
-       WHERE uo.user_id = $1 AND uo.is_favorite = true
+       WHERE uo.user_id = $1 
+       AND uo.is_favorite = true
+       AND o.is_active = true
        ORDER BY o.created_at DESC`,
       [userId]
     );
@@ -242,7 +247,8 @@ const getOfferById = async (req, res) => {
       `SELECT o.*, uo.is_new, uo.is_favorite, uo.viewed_at
        FROM offers o
        LEFT JOIN user_offers uo ON o.id = uo.offer_id AND uo.user_id = $1
-       WHERE o.id = $2`,
+       WHERE o.id = $2
+       AND o.is_active = true`,
       [userId, offerId]
     );
 
@@ -274,7 +280,10 @@ const markAsRead = async (req, res) => {
     const userId = req.user.id;
     const offerId = req.params.id;
 
-    const offerCheck = await query('SELECT id FROM offers WHERE id = $1', [offerId]);
+    const offerCheck = await query(
+      'SELECT id FROM offers WHERE id = $1 AND is_active = true', 
+      [offerId]
+    );
     
     if (offerCheck.rows.length === 0) {
       return res.status(404).json({
@@ -310,7 +319,10 @@ const toggleFavorite = async (req, res) => {
     const userId = req.user.id;
     const offerId = req.params.id;
 
-    const offerCheck = await query('SELECT id FROM offers WHERE id = $1', [offerId]);
+    const offerCheck = await query(
+      'SELECT id FROM offers WHERE id = $1 AND is_active = true', 
+      [offerId]
+    );
     
     if (offerCheck.rows.length === 0) {
       return res.status(404).json({
@@ -359,4 +371,3 @@ module.exports = {
   markAsRead,
   toggleFavorite
 };
-
