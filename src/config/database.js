@@ -21,6 +21,7 @@ if (CNX) {
   pool = new Pool({
     connectionString: CNX,
     ssl: sslNeededFromEnvOrCnx(CNX),
+    application_name: 'apd-sync',
   });
   // Nota: no logeamos secretos ni valores
   console.log('✓ DB config: DATABASE_URL');
@@ -32,10 +33,11 @@ if (CNX) {
     user: process.env.DB_USER || process.env.PGUSER,
     password: process.env.DB_PASSWORD || process.env.PGPASSWORD,
     database: process.env.DB_NAME || process.env.PGDATABASE,
+    application_name: 'apd-sync',
   };
 
   const missing = Object.entries(cfg)
-    .filter(([, v]) => !v)
+    .filter(([k, v]) => k !== 'application_name' && !v)
     .map(([k]) => k);
 
   if (missing.length) {
@@ -53,6 +55,15 @@ if (CNX) {
   });
   console.log('✓ DB config: DB_*');
 }
+
+// Forzar sesión UTF-8 y strings estándar en cada conexión
+pool.on('connect', async (client) => {
+  try {
+    await client.query("SET client_encoding TO 'UTF8'; SET standard_conforming_strings = on;");
+  } catch (e) {
+    console.warn('[DB] No se pudo setear client_encoding:', e.message);
+  }
+});
 
 // Manejadores de pool (sin datos sensibles)
 pool.on('error', (err) => {
