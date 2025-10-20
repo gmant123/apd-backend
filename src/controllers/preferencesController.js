@@ -7,7 +7,7 @@ const { query } = require('../config/database');
 const getPreferences = async (req, res) => {
   try {
     const userId = req.user.id;
-
+    
     const result = await query(
       `SELECT modalidades, distritos, turnos, notif_diaria
        FROM user_preferences
@@ -22,32 +22,29 @@ const getPreferences = async (req, res) => {
          VALUES ($1, '[]'::jsonb, '[]'::jsonb, '[]'::jsonb)`,
         [userId]
       );
-
+      
       return res.json({
         success: true,
         preferences: {
           modalidades: [],
           distritos: [],
           turnos: [],
-          notif_diaria: true,
-          notif_hora: '21:00'
+          notif_diaria: true
         }
       });
     }
 
     const prefs = result.rows[0];
-
+    
     res.json({
       success: true,
       preferences: {
         modalidades: prefs.modalidades || [],
         distritos: prefs.distritos || [],
         turnos: prefs.turnos || [],
-        notif_diaria: prefs.notif_diaria !== false,
-        notif_hora: prefs.notif_hora || '21:00'
+        notif_diaria: prefs.notif_diaria !== false
       }
     });
-
   } catch (error) {
     console.error('Error al obtener preferencias:', error);
     res.status(500).json({
@@ -64,7 +61,7 @@ const getPreferences = async (req, res) => {
 const updatePreferences = async (req, res) => {
   try {
     const userId = req.user.id;
-    const { modalidades, distritos, turnos, notif_diaria, notif_hora } = req.body;
+    const { modalidades, distritos, turnos, notif_diaria } = req.body;
 
     // Validar que se envíen datos
     if (!modalidades && !distritos && !turnos && notif_diaria === undefined) {
@@ -89,18 +86,16 @@ const updatePreferences = async (req, res) => {
         modalidades, 
         distritos, 
         turnos, 
-        notif_diaria, 
-        notif_hora,
+        notif_diaria,
         updated_at
       )
-      VALUES ($1, $2, $3, $4, $5, $6, NOW())
+      VALUES ($1, $2, $3, $4, $5, NOW())
       ON CONFLICT (user_id) 
       DO UPDATE SET
         modalidades = EXCLUDED.modalidades,
         distritos = EXCLUDED.distritos,
         turnos = EXCLUDED.turnos,
         notif_diaria = EXCLUDED.notif_diaria,
-        notif_hora = EXCLUDED.notif_hora,
         updated_at = NOW()
       RETURNING *`,
       [
@@ -108,8 +103,7 @@ const updatePreferences = async (req, res) => {
         JSON.stringify(modalidades || []),
         JSON.stringify(distritos || []),
         JSON.stringify(turnos || []),
-        notif_diaria !== undefined ? notif_diaria : true,
-        notif_hora || '21:00'
+        notif_diaria !== undefined ? notif_diaria : true
       ]
     );
 
@@ -122,11 +116,9 @@ const updatePreferences = async (req, res) => {
         modalidades: updated.modalidades || [],
         distritos: updated.distritos || [],
         turnos: updated.turnos || [],
-        notif_diaria: updated.notif_diaria,
-        notif_hora: updated.notif_hora
+        notif_diaria: updated.notif_diaria
       }
     });
-
   } catch (error) {
     console.error('Error al actualizar preferencias:', error);
     res.status(500).json({
@@ -140,4 +132,3 @@ module.exports = {
   getPreferences,
   updatePreferences
 };
-
