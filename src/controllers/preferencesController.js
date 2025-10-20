@@ -9,7 +9,7 @@ const getPreferences = async (req, res) => {
     const userId = req.user.id;
 
     const result = await query(
-      `SELECT modalidades, distritos, turnos, notif_diaria, notif_hora
+      `SELECT modalidades, distritos, turnos, notif_diaria
        FROM user_preferences
        WHERE user_id = $1`,
       [userId]
@@ -140,3 +140,4 @@ module.exports = {
   getPreferences,
   updatePreferences
 };
+
