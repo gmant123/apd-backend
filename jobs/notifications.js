@@ -112,13 +112,39 @@ async function sendDailyNotifications() {
     const expoNotifs = []; // [{ userId, token }]
     const fcmNotifs = [];  // [{ userId, token, email, name, count }]
 
-    // 2) Para cada usuario, contar ofertas disponibles
+    // 2) Para cada usuario, contar ofertas disponibles según sus preferencias
     for (const user of users) {
       try {
-        const offersResult = await query(
-          `SELECT COUNT(*) AS count FROM user_offers WHERE user_id = $1`,
+        // Obtener preferencias del usuario
+        const prefsResult = await query(
+          `SELECT modalidades, distritos FROM user_preferences WHERE user_id = $1`,
           [user.id]
         );
+
+        if (prefsResult.rows.length === 0) {
+          skipped++;
+          continue;
+        }
+
+        const prefs = prefsResult.rows[0];
+        const modalidades = prefs.modalidades || [];
+        const distritos = prefs.distritos || [];
+
+        if (modalidades.length === 0 || distritos.length === 0) {
+          skipped++;
+          continue;
+        }
+
+        // Contar ofertas que coinciden con preferencias
+        const offersResult = await query(
+          `SELECT COUNT(*) AS count 
+           FROM offers o
+           WHERE o.is_active = true
+             AND LOWER(o.modalidad) = ANY($1::text[])
+             AND LOWER(o.distrito) = ANY($2::text[])`,
+          [modalidades.map(m => m.toLowerCase()), distritos.map(d => d.toLowerCase())]
+        );
+
         const offersCount = parseInt(offersResult.rows[0].count, 10) || 0;
 
         if (offersCount === 0) {
